@@ -57,20 +57,33 @@
     #preview,
     #previewBlur {
       position: absolute;
-      inset: 0;
+      top: 0;
+      left: 0;
       width: 100%;
       height: 100%;
+      min-width: 100%;
+      min-height: 100%;
+      max-width: none;
+      max-height: none;
       object-fit: cover;
+      object-position: center center;
       background: #000;
       transform-origin: center center;
       transition: transform 0.12s ease-out;
+      opacity: 0;
+    }
+
+    #preview.ready,
+    #previewBlur.ready {
+      opacity: 1;
     }
 
     #previewBlur {
       filter: blur(var(--dof-blur));
       -webkit-filter: blur(var(--dof-blur));
-      opacity: var(--dof-amount);
+      opacity: 0;
       pointer-events: none;
+      will-change: filter, opacity;
       -webkit-mask-image: radial-gradient(
         ellipse 42% 38% at 50% 42%,
         transparent 0%,
@@ -85,6 +98,10 @@
         #000 78%,
         #000 100%
       );
+    }
+
+    #previewBlur.ready {
+      opacity: var(--dof-amount);
     }
 
     #overlay {
@@ -126,29 +143,50 @@
       flex: 1;
       -webkit-appearance: none;
       appearance: none;
+      height: 28px;
+      margin: 0;
+      background: transparent;
+      outline: none;
+      touch-action: none;
+      cursor: pointer;
+    }
+
+    #apertureSlider::-webkit-slider-runnable-track {
       height: 4px;
       border-radius: 999px;
       background: rgba(255, 255, 255, 0.28);
-      outline: none;
     }
 
     #apertureSlider::-webkit-slider-thumb {
       -webkit-appearance: none;
       appearance: none;
-      width: 22px;
-      height: 22px;
+      width: 26px;
+      height: 26px;
+      margin-top: -11px;
       border-radius: 50%;
       background: #fff;
       border: 0;
-      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+      box-shadow: 0 1px 6px rgba(0, 0, 0, 0.4);
+      transition: transform 0.08s ease-out;
+    }
+
+    #apertureSlider:active::-webkit-slider-thumb {
+      transform: scale(1.12);
+    }
+
+    #apertureSlider::-moz-range-track {
+      height: 4px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.28);
     }
 
     #apertureSlider::-moz-range-thumb {
-      width: 22px;
-      height: 22px;
+      width: 26px;
+      height: 26px;
       border-radius: 50%;
       background: #fff;
       border: 0;
+      box-shadow: 0 1px 6px rgba(0, 0, 0, 0.4);
     }
 
     #toast {
@@ -398,9 +436,9 @@
           id="apertureSlider"
           type="range"
           min="0"
-          max="7"
+          max="1000"
           step="1"
-          value="2"
+          value="286"
           aria-label="景深光圈"
         />
       </div>
@@ -464,7 +502,9 @@
       const apertureLabel = document.getElementById("apertureLabel");
       const apertureSlider = document.getElementById("apertureSlider");
 
-      const APERTURE_STOPS = [1.4, 2, 2.8, 4, 5.6, 8, 11, 16];
+      const F_MIN = 1.4;
+      const F_MAX = 16;
+      const SLIDER_MAX = 1000;
 
       // 以主摄 ≈24mm 为 1x，焦段换算成相对倍率
       const MODE_PRESETS = {
@@ -500,9 +540,11 @@
       let shootMode = "landscape";
       let zoomFactor = 1;
       let digitalScale = 1;
-      let apertureIndex = 2; // f/2.8
+      let apertureF = 2.8;
       let supportZoom = false;
       let supportLensSwitch = false;
+      let supportBackgroundBlur = false;
+      let dofRaf = 0;
       let hwZoom = { min: 1, max: 1 };
       /** @type {{deviceId:string,label:string,kind:string,base:number}[]} */
       let lenses = [];
@@ -698,34 +740,87 @@
 
       function formatAperture(value) {
         const n = Number(value);
-        if (Number.isInteger(n)) return "f/" + n;
-        return "f/" + n.toFixed(1).replace(/\.0$/, "");
+        // 显示一位小数，整数也写成 f/2.0 更稳；常用整档去尾零
+        if (Math.abs(n - Math.round(n)) < 0.05) return "f/" + Math.round(n);
+        return "f/" + n.toFixed(1);
+      }
+
+      function sliderToF(sliderValue) {
+        const t = clamp(Number(sliderValue) / SLIDER_MAX, 0, 1);
+        // 对数映射：滑动更符合光圈档位感知
+        return F_MIN * Math.pow(F_MAX / F_MIN, t);
+      }
+
+      function fToSlider(f) {
+        const t = Math.log(clamp(f, F_MIN, F_MAX) / F_MIN) / Math.log(F_MAX / F_MIN);
+        return Math.round(t * SLIDER_MAX);
       }
 
       function getDofStrength() {
         // f/1.4 → 1（浅景深），f/16 → 0（深景深）
-        return 1 - apertureIndex / (APERTURE_STOPS.length - 1);
+        const t = Math.log(clamp(apertureF, F_MIN, F_MAX) / F_MIN) / Math.log(F_MAX / F_MIN);
+        return 1 - t;
       }
 
-      function updateApertureUI() {
-        const f = APERTURE_STOPS[apertureIndex];
-        apertureLabel.textContent = formatAperture(f);
-        apertureSlider.value = String(apertureIndex);
-        const strength = getDofStrength();
+      function applySoftwareDof(strength) {
         document.documentElement.style.setProperty(
           "--dof-blur",
-          (strength * 16).toFixed(1) + "px"
+          (strength * 18).toFixed(2) + "px"
         );
         document.documentElement.style.setProperty(
           "--dof-amount",
-          strength.toFixed(3)
+          strength.toFixed(4)
         );
       }
 
-      function setApertureIndex(index) {
-        apertureIndex = Math.max(0, Math.min(APERTURE_STOPS.length - 1, index | 0));
-        updateApertureUI();
+      async function applyHardwareDof(strength) {
+        if (!supportBackgroundBlur) return false;
+        const track = getTrack();
+        if (!track) return false;
+        // 现成硬件/系统背景虚化通常只有开关，浅景深时打开
+        const want = strength > 0.28;
+        const settings =
+          typeof track.getSettings === "function" ? track.getSettings() : {};
+        if (settings.backgroundBlur === want) return true;
+        try {
+          await track.applyConstraints({ backgroundBlur: want });
+          return true;
+        } catch (_) {
+          return false;
+        }
       }
+
+      function updateApertureUI(options) {
+        options = options || {};
+        apertureLabel.textContent = formatAperture(apertureF);
+        if (!options.keepSlider) {
+          apertureSlider.value = String(fToSlider(apertureF));
+        }
+        const strength = getDofStrength();
+        applySoftwareDof(strength);
+        if (!options.skipHardware) {
+          applyHardwareDof(strength);
+        }
+      }
+
+      function setApertureFromSlider(sliderValue, options) {
+        apertureF = sliderToF(sliderValue);
+        updateApertureUI(Object.assign({ keepSlider: true }, options || {}));
+      }
+
+      function markVideosReady() {
+        video.classList.add("ready");
+        videoBlur.classList.add("ready");
+      }
+
+      function bindVideoReady(el) {
+        el.addEventListener("loadedmetadata", markVideosReady);
+        el.addEventListener("playing", markVideosReady);
+        el.addEventListener("resize", markVideosReady);
+      }
+
+      bindVideoReady(video);
+      bindVideoReady(videoBlur);
 
       async function openStream(constraints) {
         return navigator.mediaDevices.getUserMedia(constraints);
@@ -756,6 +851,8 @@
 
         const prev = stream;
         stream = next;
+        video.classList.remove("ready");
+        videoBlur.classList.remove("ready");
         video.srcObject = stream;
         videoBlur.srcObject = stream;
         try {
@@ -763,6 +860,7 @@
             video.play(),
             videoBlur.play().catch(function () {}),
           ]);
+          markVideosReady();
         } catch (err) {
           next.getTracks().forEach(function (t) { t.stop(); });
           stream = prev;
@@ -945,6 +1043,19 @@
         await discoverLenses();
         refreshHwZoom();
         const track = getTrack();
+
+        supportBackgroundBlur = false;
+        if (track && typeof track.getCapabilities === "function") {
+          const caps = track.getCapabilities() || {};
+          if (
+            Array.isArray(caps.backgroundBlur) &&
+            caps.backgroundBlur.indexOf(true) !== -1 &&
+            caps.backgroundBlur.indexOf(false) !== -1
+          ) {
+            supportBackgroundBlur = true;
+          }
+        }
+
         if (supportZoom && track) {
           try {
             const settings =
@@ -1178,9 +1289,35 @@
 
       updateModeButtons();
       renderFocalButtons();
+      updateApertureUI({ skipHardware: true });
+
+      function onApertureInput() {
+        const value = Number(apertureSlider.value);
+        if (dofRaf) cancelAnimationFrame(dofRaf);
+        dofRaf = requestAnimationFrame(function () {
+          dofRaf = 0;
+          setApertureFromSlider(value, { skipHardware: true });
+        });
+      }
+
+      function onApertureCommit() {
+        if (dofRaf) {
+          cancelAnimationFrame(dofRaf);
+          dofRaf = 0;
+        }
+        setApertureFromSlider(Number(apertureSlider.value));
+      }
+
+      apertureSlider.addEventListener("input", onApertureInput);
+      apertureSlider.addEventListener("change", onApertureCommit);
+      apertureSlider.addEventListener("pointerup", onApertureCommit);
+      apertureSlider.addEventListener("touchend", onApertureCommit);
 
       document.addEventListener("visibilitychange", function () {
-        if (!document.hidden && stream) video.play().catch(function () {});
+        if (!document.hidden && stream) {
+          video.play().catch(function () {});
+          videoBlur.play().catch(function () {});
+        }
       });
 
       // 直接进入拍摄页并尝试开相机；失败再显示轻触重试
