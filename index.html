@@ -38,6 +38,13 @@
       overflow: hidden;
     }
 
+    #stage {
+      position: absolute;
+      inset: 0;
+      overflow: hidden;
+      background: #000;
+    }
+
     #preview {
       position: absolute;
       inset: 0;
@@ -47,6 +54,7 @@
       background: #000;
       transform-origin: center center;
       transition: transform 0.12s ease-out;
+      will-change: transform;
     }
 
     #preview.dragging {
@@ -97,28 +105,29 @@
 
     #dialWrap {
       position: relative;
-      width: min(320px, 86vw);
-      height: 118px;
+      width: min(340px, 90vw);
+      height: 150px;
       touch-action: none;
+    }
+
+    #zoomReadout {
+      position: absolute;
+      left: 50%;
+      top: 10px;
+      transform: translateX(-50%);
+      color: #f5d76e;
+      font-size: 16px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      text-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+      pointer-events: none;
+      z-index: 2;
     }
 
     #dialCanvas {
       width: 100%;
       height: 100%;
       display: block;
-    }
-
-    #zoomReadout {
-      position: absolute;
-      left: 50%;
-      bottom: 8px;
-      transform: translateX(-50%);
-      color: #f5d76e;
-      font-size: 15px;
-      font-weight: 700;
-      font-variant-numeric: tabular-nums;
-      text-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
-      pointer-events: none;
     }
 
     #zoomBar {
@@ -315,7 +324,9 @@
 </head>
 <body>
   <div id="app">
-    <video id="preview" playsinline autoplay muted></video>
+    <div id="stage">
+      <video id="preview" playsinline autoplay muted></video>
+    </div>
     <canvas id="shot"></canvas>
     <div id="flash"></div>
 
@@ -323,7 +334,7 @@
       <div id="toast"></div>
       <div id="zoomStack">
         <div id="dialWrap">
-          <canvas id="dialCanvas" width="640" height="236"></canvas>
+          <canvas id="dialCanvas" width="680" height="300"></canvas>
           <div id="zoomReadout">1x</div>
         </div>
         <div id="zoomBar" aria-label="焦距快捷切换"></div>
@@ -394,12 +405,16 @@
       };
 
       let dialDragging = false;
+      let dialRotation = 0; // 转盘旋转角：盘转、针不动
+      let dragStartAngle = 0;
+      let dragStartRotation = 0;
       let pinchActive = false;
       let pinchStartDistance = 0;
       let pinchStartZoom = 1;
       let switchToken = 0;
       let lastHwZoomToastAt = 0;
       let pendingHwZoomToast = false;
+      let lastGoodStream = null;
 
       // 镜头切换滞回，避免转盘在边界抖切
       const HYST = {
@@ -695,8 +710,14 @@
           return false;
         }
 
+        // 探测未通过时，禁止在拍摄中切镜头，避免黑屏
+        if (!options.force && !supportLensSwitch) {
+          return false;
+        }
+
         const token = ++switchToken;
         switchingLens = true;
+        const prev = stream;
 
         try {
           const constraints = {
@@ -718,10 +739,7 @@
           try {
             nextStream = await openStream(constraints);
           } catch (_) {
-            nextStream = await openStream({
-              audio: false,
-              video: { facingMode: { ideal: "environment" } },
-            });
+            throw new Error("无法打开目标镜头");
           }
 
           if (token !== switchToken) {
@@ -729,19 +747,37 @@
             return false;
           }
 
-          const prev = stream;
           stream = nextStream;
           video.srcObject = stream;
-          await video.play();
-          if (prev) prev.getTracks().forEach(function (t) { t.stop(); });
+          try {
+            await video.play();
+          } catch (playErr) {
+            nextStream.getTracks().forEach(function (t) { t.stop(); });
+            stream = prev;
+            video.srcObject = prev;
+            if (prev) await video.play().catch(function () {});
+            throw playErr;
+          }
+
+          if (prev && prev !== stream) {
+            prev.getTracks().forEach(function (t) { t.stop(); });
+          }
 
           currentLens = lens;
           refreshTrackZoomCaps();
+          video.style.transform = "none";
+          zoom.digital = 1;
 
           if (options.notify !== false) {
             toastHardware("硬件：已切换" + lensCaption(lens));
           }
           return true;
+        } catch (err) {
+          if (prev && !stream) {
+            stream = prev;
+            video.srcObject = prev;
+          }
+          return false;
         } finally {
           if (token === switchToken) switchingLens = false;
         }
@@ -749,53 +785,57 @@
 
       function logicalToHardwareZoom(logicalZoom, lens) {
         const base = (lens && lens.base) || 1;
-        // 把逻辑倍率映射到当前镜头的 zoom 约束
         const relative = logicalZoom / base;
         if (!zoom.hardware) return relative;
         return clamp(relative, zoom.hwMin, zoom.hwMax);
+      }
+
+      function setDigitalZoomVisual(factor, animate) {
+        // 只允许放大，禁止 scale<1，否则会出现黑框
+        const z = Math.max(1, factor);
+        zoom.digital = z;
+        video.classList.toggle("dragging", !animate);
+        video.style.transform = z > 1.001 ? "scale(" + z + ")" : "none";
       }
 
       async function applyLogicalZoom(logicalZoom, options) {
         options = options || {};
         const animate = !!options.animate;
         const quiet = !!options.quiet;
+        const fromDial = !!options.fromDial;
         zoom.value = clamp(logicalZoom, zoom.min, zoom.max);
+        if (!fromDial) {
+          syncDialRotationFromZoom();
+        }
 
-        const target = pickLensForZoom(zoom.value, currentLens);
-        if (target && (!currentLens || target.deviceId !== currentLens.deviceId)) {
-          try {
-            await switchToLens(target, { notify: !quiet });
-          } catch (err) {
-            // 切镜头失败则继续在当前镜头上变焦
+        // 仅当探测确认可切镜头时才切换
+        if (supportLensSwitch) {
+          const target = pickLensForZoom(zoom.value, currentLens);
+          if (target && (!currentLens || target.deviceId !== currentLens.deviceId)) {
+            try {
+              await switchToLens(target, { notify: !quiet });
+            } catch (_) {}
           }
         }
 
         const track = getTrack();
         const hwZoom = logicalToHardwareZoom(zoom.value, currentLens);
 
-        if (zoom.hardware && track) {
-          zoom.digital = 1;
-          video.classList.toggle("dragging", !animate);
-          video.style.transform = "none";
+        if (supportZoom && zoom.hardware && track) {
+          setDigitalZoomVisual(1, animate);
           try {
             await track.applyConstraints({ advanced: [{ zoom: hwZoom }] });
             if (!quiet) {
-              // 点击倍率：立刻提示；转盘/捏合：节流，松手后再提示
               toastHardwareZoom(!!animate || !!options.forceHwToast);
             }
           } catch (_) {
-            // 硬件失败 → 数字
             zoom.hardware = false;
-            zoom.digital = Math.max(1, hwZoom);
-            video.style.transform = "scale(" + zoom.digital + ")";
+            supportZoom = false;
+            setDigitalZoomVisual(Math.max(1, zoom.value), animate);
           }
         } else {
-          // 无多镜头时，镜头切换已改变视角；镜头内再用数字变焦
-          const base = (currentLens && currentLens.base) || 1;
-          zoom.digital = Math.max(1, zoom.value / base);
-          video.classList.toggle("dragging", !animate);
-          video.style.transform =
-            zoom.digital > 1.001 ? "scale(" + zoom.digital + ")" : "none";
+          // 纯数字变焦：始终 >= 1x 放大裁切，避免黑框
+          setDigitalZoomVisual(Math.max(1, zoom.value), animate);
         }
 
         updateZoomUI();
@@ -858,7 +898,9 @@
         );
       }
 
-      // -------- 转盘（对数刻度，类似系统相机手感） --------
+      // -------- 转盘：圆弧向上；指针固定在正上方；转动的是刻度盘 --------
+      const DIAL_SPAN = Math.PI * 0.95;
+
       function zoomToT(z) {
         return Math.log(z / zoom.min) / Math.log(zoom.max / zoom.min);
       }
@@ -867,111 +909,139 @@
         return zoom.min * Math.pow(zoom.max / zoom.min, clamp(t, 0, 1));
       }
 
-      function drawDial() {
+      function syncDialRotationFromZoom() {
+        // t=0 → 旋转 0；t=1 → 旋转 -DIAL_SPAN，使当前倍率对准正上方指针
+        dialRotation = -zoomToT(zoom.value) * DIAL_SPAN;
+      }
+
+      function dialGeometry() {
         const w = dialCanvas.width;
         const h = dialCanvas.height;
+        return {
+          w: w,
+          h: h,
+          cx: w / 2,
+          // 圆心在下方，弧向上凸
+          cy: h * 0.92,
+          radius: Math.min(w * 0.42, h * 0.78),
+        };
+      }
+
+      function drawDial() {
+        const g = dialGeometry();
         const ctx = dialCtx;
-        ctx.clearRect(0, 0, w, h);
+        ctx.clearRect(0, 0, g.w, g.h);
 
-        const cx = w / 2;
-        const cy = h * 0.12;
-        const radius = Math.min(w, h * 2.2) * 0.42;
-        const start = Math.PI * 0.12;
-        const end = Math.PI - Math.PI * 0.12;
-
-        ctx.lineWidth = 10;
-        ctx.strokeStyle = "rgba(255,255,255,0.18)";
+        // 可视窗口：上半圆弧
+        ctx.save();
         ctx.beginPath();
-        ctx.arc(cx, cy, radius, start, end);
+        ctx.rect(0, 0, g.w, g.h * 0.88);
+        ctx.clip();
+
+        ctx.translate(g.cx, g.cy);
+        ctx.rotate(dialRotation);
+
+        // 背景弧（上半圆：从左到右，顺时针经上方）
+        ctx.beginPath();
+        ctx.arc(0, 0, g.radius, Math.PI, 0, true);
+        ctx.lineWidth = 12;
+        ctx.strokeStyle = "rgba(255,255,255,0.16)";
         ctx.stroke();
 
-        // ticks
-        for (let i = 0; i <= 40; i++) {
-          const t = i / 40;
-          const ang = start + (end - start) * t;
-          const major = i % 5 === 0;
-          const r1 = radius - (major ? 18 : 10);
-          const r2 = radius + (major ? 6 : 2);
-          const x1 = cx + Math.cos(ang) * r1;
-          const y1 = cy + Math.sin(ang) * r1;
-          const x2 = cx + Math.cos(ang) * r2;
-          const y2 = cy + Math.sin(ang) * r2;
+        // 刻度（绕上半圆均匀分布，随盘旋转）
+        const tickCount = 48;
+        for (let i = 0; i <= tickCount; i++) {
+          const t = i / tickCount;
+          // 本地角：PI → 0 经上方（clockwise from left to right via top = true means...)
+          // angle from PI to 0 going clockwise: ang = PI - t * PI
+          const ang = Math.PI - t * Math.PI;
+          const major = i % 6 === 0;
+          const r1 = g.radius - (major ? 20 : 11);
+          const r2 = g.radius + (major ? 8 : 3);
+          const x1 = Math.cos(ang) * r1;
+          const y1 = Math.sin(ang) * r1;
+          const x2 = Math.cos(ang) * r2;
+          const y2 = Math.sin(ang) * r2;
           ctx.beginPath();
           ctx.moveTo(x1, y1);
           ctx.lineTo(x2, y2);
           ctx.lineWidth = major ? 3 : 2;
           ctx.strokeStyle = major
-            ? "rgba(255,255,255,0.55)"
+            ? "rgba(255,255,255,0.62)"
             : "rgba(255,255,255,0.28)";
           ctx.stroke();
         }
 
-        // preset marks
+        // 预设倍率刻度文字（画在盘上，随盘转）
         zoom.presets.forEach(function (preset) {
           const t = zoomToT(preset);
-          const ang = start + (end - start) * t;
-          const x = cx + Math.cos(ang) * (radius + 16);
-          const y = cy + Math.sin(ang) * (radius + 16);
-          ctx.fillStyle = "rgba(255,255,255,0.7)";
-          ctx.font = "22px -apple-system, sans-serif";
+          const ang = Math.PI - t * Math.PI;
+          const x = Math.cos(ang) * (g.radius + 28);
+          const y = Math.sin(ang) * (g.radius + 28);
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.rotate(ang + Math.PI / 2);
+          ctx.fillStyle = "rgba(255,255,255,0.78)";
+          ctx.font = "24px -apple-system, sans-serif";
           ctx.textAlign = "center";
           ctx.textBaseline = "middle";
-          ctx.fillText(formatZoomLabel(preset), x, y);
+          ctx.fillText(formatZoomLabel(preset) + "x", 0, 0);
+          ctx.restore();
         });
 
-        // needle
-        const t = zoomToT(zoom.value);
-        const ang = start + (end - start) * t;
-        ctx.beginPath();
-        ctx.moveTo(cx, cy);
-        ctx.lineTo(cx + Math.cos(ang) * (radius - 4), cy + Math.sin(ang) * (radius - 4));
-        ctx.lineWidth = 4;
-        ctx.strokeStyle = "#f5d76e";
-        ctx.stroke();
+        ctx.restore();
 
-        ctx.beginPath();
-        ctx.arc(
-          cx + Math.cos(ang) * radius,
-          cy + Math.sin(ang) * radius,
-          10,
-          0,
-          Math.PI * 2
-        );
+        // 固定指针：始终朝向正上方（屏幕 12 点方向）
+        ctx.save();
+        ctx.translate(g.cx, g.cy);
+        ctx.strokeStyle = "#f5d76e";
         ctx.fillStyle = "#f5d76e";
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(0, -18);
+        ctx.lineTo(0, -g.radius + 6);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(-8, -g.radius + 22);
+        ctx.lineTo(0, -g.radius + 4);
+        ctx.lineTo(8, -g.radius + 22);
+        ctx.closePath();
         ctx.fill();
+        ctx.restore();
       }
 
-      function eventToZoom(clientX, clientY) {
+      function pointerAngle(clientX, clientY) {
         const rect = dialCanvas.getBoundingClientRect();
-        const scaleX = dialCanvas.width / rect.width;
-        const scaleY = dialCanvas.height / rect.height;
-        const x = (clientX - rect.left) * scaleX;
-        const y = (clientY - rect.top) * scaleY;
-        const cx = dialCanvas.width / 2;
-        const cy = dialCanvas.height * 0.12;
-        let ang = Math.atan2(y - cy, x - cx); // 0 at +x, clockwise? atan2
-        const start = Math.PI * 0.12;
-        const end = Math.PI - Math.PI * 0.12;
-        // Our arc is the bottom-ish semicircle from start to end (both in 0..PI)
-        ang = clamp(ang, start, end);
-        const t = (ang - start) / (end - start);
-        return tToZoom(t);
+        const g = dialGeometry();
+        const x = ((clientX - rect.left) / rect.width) * g.w;
+        const y = ((clientY - rect.top) / rect.height) * g.h;
+        return Math.atan2(y - g.cy, x - g.cx);
+      }
+
+      function normalizeDelta(delta) {
+        while (delta > Math.PI) delta -= Math.PI * 2;
+        while (delta < -Math.PI) delta += Math.PI * 2;
+        return delta;
       }
 
       function onDialPointerDown(event) {
         if (!stream) return;
         dialDragging = true;
         dialWrap.setPointerCapture(event.pointerId);
-        applyLogicalZoom(eventToZoom(event.clientX, event.clientY), {
-          animate: false,
-        });
+        dragStartAngle = pointerAngle(event.clientX, event.clientY);
+        dragStartRotation = dialRotation;
       }
 
       function onDialPointerMove(event) {
         if (!dialDragging) return;
-        applyLogicalZoom(eventToZoom(event.clientX, event.clientY), {
-          animate: false,
-        });
+        const ang = pointerAngle(event.clientX, event.clientY);
+        const delta = normalizeDelta(ang - dragStartAngle);
+        // 拖盘：手指往哪边搓，刻度盘跟着转（指针不动）
+        dialRotation = dragStartRotation - delta;
+
+        // 指针固定在正上方；盘旋转后，正上方对应的 t
+        const t = clamp(-dialRotation / DIAL_SPAN, 0, 1);
+        applyLogicalZoom(tToZoom(t), { animate: false, fromDial: true });
       }
 
       function onDialPointerUp(event) {
@@ -981,6 +1051,8 @@
           dialWrap.releasePointerCapture(event.pointerId);
         } catch (_) {}
         video.classList.remove("dragging");
+        syncDialRotationFromZoom();
+        drawDial();
         flushHardwareZoomToast();
         updateZoomUI();
       }
@@ -1092,7 +1164,7 @@
           lenses.find(function (l) { return l.kind === "wide"; }) || lenses[0];
         if (wide) {
           try {
-            await switchToLens(wide, { notify: false });
+            await switchToLens(wide, { notify: false, force: true });
           } catch (_) {
             currentLens = wide;
             refreshTrackZoomCaps();
@@ -1146,7 +1218,7 @@
           const target = tryList[0];
           const beforeId = currentLens && currentLens.deviceId;
           try {
-            await switchToLens(target, { notify: false });
+            await switchToLens(target, { notify: false, force: true });
             const afterTrack = getTrack();
             const afterSettings =
               afterTrack && typeof afterTrack.getSettings === "function"
@@ -1157,13 +1229,13 @@
 
             // 切回主摄
             if (wide) {
-              await switchToLens(wide, { notify: false });
+              await switchToLens(wide, { notify: false, force: true });
             }
           } catch (_) {
             supportLensSwitch = false;
             if (wide) {
               try {
-                await switchToLens(wide, { notify: false });
+                await switchToLens(wide, { notify: false, force: true });
               } catch (err2) {}
             }
           }
@@ -1233,6 +1305,21 @@
       }
 
       function showProbeResult(report) {
+        // 无超广硬件时，数字变焦不提供 .5（会缩画面出黑框）
+        const canUltra =
+          report.supportLensSwitch ||
+          (report.supportZoom && zoom.hwMin < 0.99);
+        zoom.min = canUltra ? 0.5 : 1;
+        zoom.max = Math.max(zoom.max, 5);
+        zoom.presets = buildPresets(zoom.min, zoom.max, canUltra ? lenses : []);
+        if (!canUltra) {
+          // buildPresets 在 min=1 时仍可能因 lensList 加 .5，强制清洗
+          zoom.presets = zoom.presets.filter(function (p) {
+            return p >= 0.99;
+          });
+          if (zoom.presets.indexOf(1) < 0) zoom.presets.unshift(1);
+        }
+
         probeStatus.textContent = "检测完成";
         probeList.hidden = false;
         probeList.innerHTML =
@@ -1252,7 +1339,7 @@
           '<li><span class="label">将使用</span><span class="label">' +
           (report.supportZoom || report.supportLensSwitch
             ? "尽量走硬件，其余数字变焦"
-            : "数字变焦") +
+            : "数字变焦（1x–5x）") +
           "</span></li>";
 
         capabilityNote =
@@ -1271,8 +1358,12 @@
         probe.classList.remove("show");
         shutter.disabled = false;
         zoomStack.classList.add("show");
+        video.style.transform = "none";
+        zoom.digital = 1;
+        zoom.value = clamp(1, zoom.min, zoom.max);
         renderZoomButtons();
-        await applyLogicalZoom(1, { animate: true, quiet: true });
+        await applyLogicalZoom(zoom.value, { animate: true, quiet: true });
+        syncDialRotationFromZoom();
         updateZoomUI();
         drawDial();
 
