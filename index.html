@@ -68,6 +68,8 @@
       opacity: 0;
       transition: opacity 0.2s ease;
       pointer-events: none;
+      text-align: center;
+      max-width: 90%;
     }
 
     #toast.show {
@@ -108,7 +110,7 @@
     }
 
     #shutter:disabled {
-      opacity: 0.4;
+      opacity: 0.35;
     }
 
     #gate {
@@ -118,11 +120,12 @@
       flex-direction: column;
       justify-content: center;
       align-items: center;
-      gap: 14px;
+      gap: 12px;
       padding: 32px;
       text-align: center;
       color: #fff;
       background: #000;
+      cursor: pointer;
     }
 
     #gate.show {
@@ -131,35 +134,37 @@
 
     #gate h1 {
       margin: 0;
-      font-size: 22px;
+      font-size: 28px;
       font-weight: 600;
+      letter-spacing: 0.02em;
     }
 
     #gate p {
       margin: 0;
-      max-width: 28em;
+      max-width: 18em;
       line-height: 1.5;
       color: rgba(255, 255, 255, 0.72);
       font-size: 15px;
     }
 
-    #startBtn,
-    #retryBtn {
-      margin-top: 8px;
-      border: 0;
-      border-radius: 12px;
-      padding: 12px 18px;
-      font-size: 16px;
-      font-weight: 600;
-      color: #111;
-      background: #fff;
-    }
-
     #secureHint {
       display: none;
-      margin-top: 8px;
+      margin-top: 4px;
       font-size: 13px;
       color: #fbbf24;
+    }
+
+    #flash {
+      position: absolute;
+      inset: 0;
+      background: #fff;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.08s ease;
+    }
+
+    #flash.show {
+      opacity: 0.85;
     }
 
     canvas {
@@ -171,20 +176,17 @@
   <div id="app">
     <video id="preview" playsinline autoplay muted></video>
     <canvas id="shot"></canvas>
+    <div id="flash"></div>
 
     <div id="overlay">
       <div id="toast"></div>
       <button id="shutter" type="button" aria-label="拍照" disabled></button>
     </div>
 
-    <div id="gate" class="show">
+    <div id="gate" class="show" role="button" tabindex="0" aria-label="轻触开启相机">
       <h1>Doyen</h1>
-      <p>点击下方按钮开启相机。拍照后可保存或分享到相册。</p>
-      <p id="secureHint">
-        当前不是 HTTPS / localhost，iPhone 可能无法调用相机。请用本地服务器或 HTTPS 打开本页面。
-      </p>
-      <button id="startBtn" type="button">开启相机</button>
-      <button id="retryBtn" type="button" hidden>重试</button>
+      <p>轻触屏幕开启相机</p>
+      <p id="secureHint">需要 HTTPS 才能使用相机</p>
     </div>
   </div>
 
@@ -195,12 +197,15 @@
       const shutter = document.getElementById("shutter");
       const toast = document.getElementById("toast");
       const gate = document.getElementById("gate");
-      const startBtn = document.getElementById("startBtn");
-      const retryBtn = document.getElementById("retryBtn");
       const secureHint = document.getElementById("secureHint");
+      const flash = document.getElementById("flash");
 
       let stream = null;
+      let starting = false;
+      let capturing = false;
       let toastTimer = null;
+      let lastBlob = null;
+      let lastName = "";
 
       function isSecureEnough() {
         return (
@@ -209,6 +214,11 @@
           location.hostname === "localhost" ||
           location.hostname === "127.0.0.1"
         );
+      }
+
+      function isIOS() {
+        return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+          (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
       }
 
       if (!isSecureEnough()) {
@@ -221,58 +231,65 @@
         clearTimeout(toastTimer);
         toastTimer = setTimeout(function () {
           toast.className = "";
-        }, 1800);
+        }, 1600);
+      }
+
+      function blinkFlash() {
+        flash.classList.add("show");
+        setTimeout(function () {
+          flash.classList.remove("show");
+        }, 90);
       }
 
       async function startCamera() {
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          throw new Error("当前浏览器不支持相机");
-        }
-        if (!isSecureEnough()) {
-          throw new Error("需要 HTTPS 或 localhost 才能使用相机");
-        }
-
-        if (stream) {
-          stream.getTracks().forEach(function (track) {
-            track.stop();
-          });
-        }
-
-        const constraints = {
-          audio: false,
-          video: {
-            facingMode: { ideal: "environment" },
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
-          },
-        };
+        if (stream) return;
+        if (starting) return;
+        starting = true;
 
         try {
-          stream = await navigator.mediaDevices.getUserMedia(constraints);
-        } catch (err) {
-          stream = await navigator.mediaDevices.getUserMedia({
-            audio: false,
-            video: true,
-          });
-        }
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            throw new Error("当前浏览器不支持相机");
+          }
+          if (!isSecureEnough()) {
+            throw new Error("需要 HTTPS 才能使用相机");
+          }
 
-        video.srcObject = stream;
-        await video.play();
-        gate.classList.remove("show");
-        shutter.disabled = false;
+          const constraints = {
+            audio: false,
+            video: {
+              facingMode: { ideal: "environment" },
+              width: { ideal: 1920 },
+              height: { ideal: 1080 },
+            },
+          };
+
+          try {
+            stream = await navigator.mediaDevices.getUserMedia(constraints);
+          } catch (err) {
+            stream = await navigator.mediaDevices.getUserMedia({
+              audio: false,
+              video: true,
+            });
+          }
+
+          video.srcObject = stream;
+          await video.play();
+          gate.classList.remove("show");
+          shutter.disabled = false;
+        } finally {
+          starting = false;
+        }
       }
 
       function captureFrame() {
         const width = video.videoWidth;
         const height = video.videoHeight;
         if (!width || !height) {
-          throw new Error("画面还没就绪，请稍后再试");
+          throw new Error("画面还没就绪");
         }
-
         canvas.width = width;
         canvas.height = height;
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(video, 0, 0, width, height);
+        canvas.getContext("2d").drawImage(video, 0, 0, width, height);
         return canvas;
       }
 
@@ -294,76 +311,116 @@
         const a = document.createElement("a");
         a.href = url;
         a.download = filename;
+        a.rel = "noopener";
         document.body.appendChild(a);
         a.click();
         a.remove();
         setTimeout(function () {
           URL.revokeObjectURL(url);
-        }, 1000);
+        }, 1500);
       }
 
       async function savePhoto(blob, filename) {
+        lastBlob = blob;
+        lastName = filename;
         const file = new File([blob], filename, { type: "image/jpeg" });
 
+        // iPhone：同一手势里立刻调起系统分享，少一步「再点保存」
         if (navigator.canShare && navigator.canShare({ files: [file] })) {
-          try {
-            await navigator.share({
-              files: [file],
-              title: "Doyen",
-            });
-            showToast("请选择存储到照片", "ok");
-            return;
-          } catch (err) {
-            if (err && err.name === "AbortError") {
-              showToast("已取消");
-              return;
-            }
-          }
+          await navigator.share({ files: [file] });
+          return;
         }
 
         downloadBlob(blob, filename);
-        showToast("已开始保存图片", "ok");
+        showToast(isIOS() ? "请用分享菜单存到照片" : "已下载", "ok");
       }
 
       async function onShutter() {
+        if (capturing) return;
+
+        if (!stream) {
+          try {
+            await startCamera();
+          } catch (err) {
+            showToast(err.message || "无法打开相机", "err");
+          }
+          return;
+        }
+
+        capturing = true;
         shutter.disabled = true;
+        blinkFlash();
+
         try {
-          const frame = captureFrame();
-          const blob = await canvasToBlob(frame);
+          const blob = await canvasToBlob(captureFrame());
           const name =
             "doyen-" +
             new Date().toISOString().replace(/[:.]/g, "-") +
             ".jpg";
           await savePhoto(blob, name);
         } catch (err) {
-          showToast(err.message || "拍照失败", "err");
+          if (err && err.name === "AbortError") {
+            // 用户关掉了分享面板：保留原图，提示可再点快门旁逻辑——这里轻提示即可
+            showToast("未保存");
+          } else {
+            showToast((err && err.message) || "拍照失败", "err");
+          }
         } finally {
+          capturing = false;
           shutter.disabled = false;
         }
       }
 
-      async function onStart() {
-        startBtn.disabled = true;
-        retryBtn.hidden = true;
+      async function onGateTap() {
         try {
           await startCamera();
         } catch (err) {
-          gate.classList.add("show");
-          retryBtn.hidden = false;
           showToast(err.message || "无法打开相机", "err");
-        } finally {
-          startBtn.disabled = false;
         }
       }
 
-      startBtn.addEventListener("click", onStart);
-      retryBtn.addEventListener("click", onStart);
+      async function tryAutostart() {
+        // 已授权过时，多数浏览器允许自动打开，跳过「再点一次」
+        try {
+          if (navigator.permissions && navigator.permissions.query) {
+            const status = await navigator.permissions.query({
+              name: "camera",
+            });
+            if (status.state === "granted") {
+              await startCamera();
+              return;
+            }
+            if (status.state === "denied") {
+              showToast("请在设置里允许相机权限", "err");
+              return;
+            }
+          }
+        } catch (_) {
+          // Safari 可能不支持 permissions.query，继续尝试直接打开
+        }
+
+        try {
+          await startCamera();
+        } catch (_) {
+          // 需要用户手势：保留「轻触屏幕」
+        }
+      }
+
+      gate.addEventListener("click", onGateTap);
+      gate.addEventListener("keydown", function (event) {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onGateTap();
+        }
+      });
       shutter.addEventListener("click", onShutter);
 
       document.addEventListener("visibilitychange", function () {
         if (document.hidden || !stream) return;
         video.play().catch(function () {});
       });
+
+      tryAutostart();
     })();
   </script>
 </body>
