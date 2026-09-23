@@ -97,30 +97,73 @@
 
     #controls.show { display: flex; }
 
-    #zoomBar {
+    #modeBar {
       display: flex;
-      gap: 6px;
-      padding: 6px 8px;
+      gap: 4px;
+      padding: 4px;
       border-radius: 999px;
       background: rgba(0, 0, 0, 0.38);
       backdrop-filter: blur(12px);
       -webkit-backdrop-filter: blur(12px);
     }
 
-    .zoom-btn {
-      min-width: 42px;
-      height: 42px;
+    .mode-btn {
+      min-width: 72px;
+      height: 34px;
       border: 0;
-      border-radius: 50%;
+      border-radius: 999px;
       background: transparent;
-      color: rgba(255, 255, 255, 0.8);
+      color: rgba(255, 255, 255, 0.72);
       font-size: 13px;
       font-weight: 600;
+    }
+
+    .mode-btn.active {
+      background: rgba(255, 255, 255, 0.18);
+      color: #fff;
+    }
+
+    #zoomBar {
+      display: flex;
+      gap: 6px;
+      padding: 6px 8px;
+      border-radius: 22px;
+      background: rgba(0, 0, 0, 0.38);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+    }
+
+    .zoom-btn {
+      min-width: 54px;
+      height: 48px;
+      border: 0;
+      border-radius: 14px;
+      background: transparent;
+      color: rgba(255, 255, 255, 0.8);
+      font-size: 12px;
+      font-weight: 600;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 1px;
+      line-height: 1.15;
+      padding: 0 6px;
+    }
+
+    .zoom-btn .mm {
+      font-size: 10px;
+      font-weight: 500;
+      color: rgba(255, 255, 255, 0.55);
     }
 
     .zoom-btn.active {
       background: rgba(255, 255, 255, 0.2);
       color: #f5d76e;
+    }
+
+    .zoom-btn.active .mm {
+      color: rgba(245, 215, 110, 0.8);
     }
 
     #bottomRow {
@@ -286,12 +329,11 @@
     <div id="overlay">
       <div id="toast"></div>
       <div id="controls">
-        <div id="zoomBar">
-          <button type="button" class="zoom-btn" data-zoom="0.5">.5</button>
-          <button type="button" class="zoom-btn active" data-zoom="1">1x</button>
-          <button type="button" class="zoom-btn" data-zoom="2">2x</button>
-          <button type="button" class="zoom-btn" data-zoom="5">5x</button>
+        <div id="modeBar">
+          <button type="button" class="mode-btn active" data-mode="landscape">风景</button>
+          <button type="button" class="mode-btn" data-mode="portrait">人像</button>
         </div>
+        <div id="zoomBar"></div>
         <div id="bottomRow">
           <div></div>
           <button id="shutter" type="button" aria-label="拍照" disabled></button>
@@ -331,6 +373,32 @@
       const probeStatus = document.getElementById("probeStatus");
       const probeList = document.getElementById("probeList");
       const probeEnter = document.getElementById("probeEnter");
+      const zoomBar = document.getElementById("zoomBar");
+      const modeBar = document.getElementById("modeBar");
+
+      // 以主摄 ≈24mm 为 1x，焦段换算成相对倍率
+      const MODE_PRESETS = {
+        landscape: {
+          label: "风景",
+          defaultZoom: 1,
+          focals: [
+            { name: "超广", mm: 13, zoom: 0.5 },
+            { name: "广角", mm: 24, zoom: 1 },
+            { name: "中景", mm: 35, zoom: 1.5 },
+            { name: "压缩", mm: 70, zoom: 3 },
+          ],
+        },
+        portrait: {
+          label: "人像",
+          defaultZoom: 2,
+          focals: [
+            { name: "环境", mm: 35, zoom: 1.5 },
+            { name: "标准", mm: 50, zoom: 2 },
+            { name: "经典", mm: 85, zoom: 3.5 },
+            { name: "特写", mm: 135, zoom: 5.5 },
+          ],
+        },
+      };
 
       let stream = null;
       let starting = false;
@@ -339,6 +407,7 @@
       let zooming = false;
       let toastTimer = null;
       let facingMode = "environment";
+      let shootMode = "landscape";
       let zoomFactor = 1;
       let digitalScale = 1;
       let supportZoom = false;
@@ -348,6 +417,33 @@
       let lenses = [];
       let currentLens = null;
       let currentDeviceId = "";
+
+      function currentPresets() {
+        return MODE_PRESETS[shootMode] || MODE_PRESETS.landscape;
+      }
+
+      function findFocal(factor) {
+        const list = currentPresets().focals;
+        let best = list[0];
+        let bestDiff = Infinity;
+        for (let i = 0; i < list.length; i++) {
+          const d = Math.abs(list[i].zoom - factor);
+          if (d < bestDiff) {
+            bestDiff = d;
+            best = list[i];
+          }
+        }
+        return best;
+      }
+
+      function formatZoomLabel(factor) {
+        const focal = findFocal(factor);
+        if (focal && Math.abs(focal.zoom - factor) < 0.05) {
+          return focal.name + " " + focal.mm + "mm";
+        }
+        if (Math.abs(factor - 0.5) < 0.01) return ".5x";
+        return (Number.isInteger(factor) ? factor : factor.toFixed(1)) + "x";
+      }
 
       function isSecureEnough() {
         return (
@@ -436,11 +532,68 @@
         const tele5 = lenses.find(function (l) { return l.kind === "tele5"; });
 
         if (factor <= 0.7 && ultra) return ultra;
-        if (factor >= 4 && tele5) return tele5;
-        if (factor >= 2.5 && tele3) return tele3;
+        if (factor >= 4.5 && tele5) return tele5;
+        if (factor >= 2.8 && tele3) return tele3;
+        if (factor >= 2.8 && tele5) return tele5;
         if (factor >= 1.7 && tele2) return tele2;
+        if (factor >= 1.7 && tele3) return tele3;
         if (factor >= 1.7 && tele5) return tele5;
         return wide;
+      }
+
+      function renderFocalButtons() {
+        const presets = currentPresets();
+        zoomBar.innerHTML = "";
+        presets.focals.forEach(function (focal) {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "zoom-btn";
+          btn.dataset.zoom = String(focal.zoom);
+          btn.innerHTML =
+            "<span>" +
+            focal.name +
+            '</span><span class="mm">' +
+            focal.mm +
+            "mm</span>";
+          btn.addEventListener("click", function () {
+            applyZoomFactor(focal.zoom, { notify: true });
+          });
+          zoomBar.appendChild(btn);
+        });
+        updateZoomButtons();
+      }
+
+      function updateModeButtons() {
+        Array.prototype.forEach.call(
+          modeBar.querySelectorAll(".mode-btn"),
+          function (btn) {
+            btn.classList.toggle("active", btn.dataset.mode === shootMode);
+          }
+        );
+      }
+
+      async function setShootMode(mode, options) {
+        options = options || {};
+        if (!MODE_PRESETS[mode]) return;
+        const prev = shootMode;
+        shootMode = mode;
+        updateModeButtons();
+        renderFocalButtons();
+
+        const presets = currentPresets();
+        const stillValid = presets.focals.some(function (f) {
+          return Math.abs(f.zoom - zoomFactor) < 0.05;
+        });
+        const nextZoom = stillValid ? zoomFactor : presets.defaultZoom;
+        await applyZoomFactor(nextZoom, { notify: false });
+
+        if (options.notify) {
+          const focal = findFocal(nextZoom);
+          showToast(
+            presets.label + " · " + focal.name + " " + focal.mm + "mm",
+            "ok"
+          );
+        }
       }
 
       function updatePreviewTransform() {
@@ -452,11 +605,11 @@
 
       function updateZoomButtons() {
         Array.prototype.forEach.call(
-          document.querySelectorAll(".zoom-btn"),
+          zoomBar.querySelectorAll(".zoom-btn"),
           function (btn) {
             btn.classList.toggle(
               "active",
-              Math.abs(Number(btn.dataset.zoom) - zoomFactor) < 0.01
+              Math.abs(Number(btn.dataset.zoom) - zoomFactor) < 0.05
             );
           }
         );
@@ -469,14 +622,17 @@
             : currentLens
               ? lensName(currentLens)
               : "后置";
+        const presets = currentPresets();
         hint.textContent =
+          presets.label +
+          " · " +
+          formatZoomLabel(zoomFactor) +
+          " · " +
           lensText +
           " · zoom " +
           (supportZoom ? "✓" : "✗") +
           " · 切镜头 " +
-          (supportLensSwitch ? "✓" : "✗") +
-          " · " +
-          (zoomFactor === 0.5 ? ".5" : zoomFactor + "x");
+          (supportLensSwitch ? "✓" : "✗");
       }
 
       async function openStream(constraints) {
@@ -658,10 +814,7 @@
               await track.applyConstraints({ advanced: [{ zoom: z }] });
               digitalScale = 1;
               if (options.notify) {
-                showToast(
-                  "硬件变焦 " + (factor === 0.5 ? ".5" : factor + "x"),
-                  "ok"
-                );
+                showToast("硬件变焦 " + formatZoomLabel(factor), "ok");
               }
               updatePreviewTransform();
               updateZoomButtons();
@@ -700,7 +853,7 @@
           } else {
             digitalScale = factor;
             if (options.notify && !supportZoom) {
-              showToast("数字变焦 " + factor + "x", "ok");
+              showToast("数字变焦 " + formatZoomLabel(factor), "ok");
             }
           }
 
@@ -798,7 +951,8 @@
           '<li><span class="label">后置镜头候选</span><span class="label">' +
           report.lensCount +
           "</span></li>" +
-          '<li><span class="label">倍率按钮</span><span class="label">.5 / 1x / 2x / 5x</span></li>';
+          '<li><span class="label">拍摄模式</span><span class="label">风景 / 人像</span></li>' +
+          '<li><span class="label">默认焦段</span><span class="label">风景 · 广角 24mm</span></li>';
         probeEnter.hidden = false;
       }
 
@@ -839,15 +993,14 @@
         controls.classList.add("show");
         shutter.disabled = false;
         flipBtn.disabled = false;
-        await applyZoomFactor(1, { notify: false });
+        shootMode = "landscape";
+        updateModeButtons();
+        renderFocalButtons();
+        await applyZoomFactor(MODE_PRESETS.landscape.defaultZoom, {
+          notify: false,
+        });
         updateHint();
-        if (supportLensSwitch) {
-          showToast("点倍率将尝试切换物理镜头", "ok");
-        } else if (supportZoom) {
-          showToast("将使用系统变焦", "ok");
-        } else {
-          showToast("将使用数字变焦；可切换前置摄像头", "ok");
-        }
+        showToast("风景 · 广角 24mm", "ok");
       }
 
       async function flipCamera() {
@@ -857,10 +1010,11 @@
         try {
           const next = facingMode === "environment" ? "user" : "environment";
           await openCamera(next);
-          zoomFactor = 1;
+          const presets = currentPresets();
+          zoomFactor = presets.defaultZoom;
           digitalScale = 1;
           updatePreviewTransform();
-          updateZoomButtons();
+          await applyZoomFactor(presets.defaultZoom, { notify: false });
           showToast(next === "user" ? "已切换到前置摄像头" : "已切换到后置摄像头", "ok");
           updateHint();
         } catch (err) {
@@ -958,13 +1112,17 @@
       flipBtn.addEventListener("click", flipCamera);
 
       Array.prototype.forEach.call(
-        document.querySelectorAll(".zoom-btn"),
+        modeBar.querySelectorAll(".mode-btn"),
         function (btn) {
           btn.addEventListener("click", function () {
-            applyZoomFactor(Number(btn.dataset.zoom), { notify: true });
+            setShootMode(btn.dataset.mode, { notify: true });
           });
         }
       );
+
+      // 初始渲染：风景 · 广角
+      updateModeButtons();
+      renderFocalButtons();
 
       document.addEventListener("visibilitychange", function () {
         if (!document.hidden && stream) video.play().catch(function () {});
