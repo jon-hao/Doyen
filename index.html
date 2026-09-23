@@ -13,6 +13,9 @@
     :root {
       color-scheme: dark;
       --safe-bottom: env(safe-area-inset-bottom, 0px);
+      --safe-top: env(safe-area-inset-top, 0px);
+      --dof-blur: 0px;
+      --dof-amount: 0;
     }
 
     * {
@@ -45,7 +48,8 @@
       background: #000;
     }
 
-    #preview {
+    #preview,
+    #previewBlur {
       position: absolute;
       inset: 0;
       width: 100%;
@@ -56,20 +60,98 @@
       transition: transform 0.12s ease-out;
     }
 
+    #previewBlur {
+      filter: blur(var(--dof-blur));
+      -webkit-filter: blur(var(--dof-blur));
+      opacity: var(--dof-amount);
+      pointer-events: none;
+      -webkit-mask-image: radial-gradient(
+        ellipse 42% 38% at 50% 42%,
+        transparent 0%,
+        transparent 35%,
+        #000 78%,
+        #000 100%
+      );
+      mask-image: radial-gradient(
+        ellipse 42% 38% at 50% 42%,
+        transparent 0%,
+        transparent 35%,
+        #000 78%,
+        #000 100%
+      );
+    }
+
     #overlay {
       position: absolute;
       inset: 0;
       display: flex;
       flex-direction: column;
-      justify-content: flex-end;
+      justify-content: space-between;
       align-items: center;
-      padding: 20px 16px calc(28px + var(--safe-bottom));
+      padding: calc(10px + var(--safe-top)) 16px calc(28px + var(--safe-bottom));
       pointer-events: none;
     }
 
+    #topBar {
+      pointer-events: auto;
+      width: min(420px, 100%);
+      display: none;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 14px;
+      border-radius: 18px;
+      background: rgba(0, 0, 0, 0.42);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+    }
+
+    #topBar.show { display: flex; }
+
+    #apertureLabel {
+      min-width: 3.4em;
+      color: #f5d76e;
+      font-size: 15px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: 0.02em;
+    }
+
+    #apertureSlider {
+      flex: 1;
+      -webkit-appearance: none;
+      appearance: none;
+      height: 4px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.28);
+      outline: none;
+    }
+
+    #apertureSlider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: #fff;
+      border: 0;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+    }
+
+    #apertureSlider::-moz-range-thumb {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: #fff;
+      border: 0;
+    }
+
     #toast {
+      position: absolute;
+      left: 50%;
+      bottom: calc(168px + var(--safe-bottom));
+      transform: translateX(-50%);
       min-height: 24px;
-      margin-bottom: 12px;
+      margin-bottom: 0;
       padding: 8px 14px;
       border-radius: 999px;
       background: rgba(0, 0, 0, 0.55);
@@ -80,6 +162,7 @@
       pointer-events: none;
       text-align: center;
       max-width: 90%;
+      z-index: 3;
     }
 
     #toast.show { opacity: 1; }
@@ -113,14 +196,6 @@
       display: flex;
       align-items: center;
       gap: 8px;
-    }
-
-    #zoomStatus {
-      font-size: 10px;
-      color: rgba(255, 255, 255, 0.55);
-      letter-spacing: 0.02em;
-      white-space: nowrap;
-      min-width: 3.2em;
     }
 
     #modeBar {
@@ -305,11 +380,24 @@
   <div id="app">
     <div id="stage">
       <video id="preview" playsinline autoplay muted></video>
+      <video id="previewBlur" playsinline autoplay muted></video>
     </div>
     <canvas id="shot"></canvas>
     <div id="flash"></div>
 
     <div id="overlay">
+      <div id="topBar" class="show">
+        <span id="apertureLabel">f/2.8</span>
+        <input
+          id="apertureSlider"
+          type="range"
+          min="0"
+          max="7"
+          step="1"
+          value="2"
+          aria-label="景深光圈"
+        />
+      </div>
       <div id="toast"></div>
       <div id="controls" class="show">
         <div id="focalRow">
@@ -319,7 +407,6 @@
           </div>
           <div id="zoomRow">
             <div id="zoomBar"></div>
-            <span id="zoomStatus">物理变焦</span>
           </div>
         </div>
         <div id="bottomRow">
@@ -355,6 +442,7 @@
   <script>
     (function () {
       const video = document.getElementById("preview");
+      const videoBlur = document.getElementById("previewBlur");
       const canvas = document.getElementById("shot");
       const shutter = document.getElementById("shutter");
       const flipBtn = document.getElementById("flipBtn");
@@ -363,10 +451,14 @@
       const secureHint = document.getElementById("secureHint");
       const flash = document.getElementById("flash");
       const controls = document.getElementById("controls");
+      const topBar = document.getElementById("topBar");
       const zoomBar = document.getElementById("zoomBar");
       const modeBar = document.getElementById("modeBar");
       const focalRow = document.getElementById("focalRow");
-      const zoomStatus = document.getElementById("zoomStatus");
+      const apertureLabel = document.getElementById("apertureLabel");
+      const apertureSlider = document.getElementById("apertureSlider");
+
+      const APERTURE_STOPS = [1.4, 2, 2.8, 4, 5.6, 8, 11, 16];
 
       // 以主摄 ≈24mm 为 1x，焦段换算成相对倍率
       const MODE_PRESETS = {
@@ -402,8 +494,7 @@
       let shootMode = "landscape";
       let zoomFactor = 1;
       let digitalScale = 1;
-      /** @type {"physical"|"digital"} */
-      let zoomKind = "physical";
+      let apertureIndex = 2; // f/2.8
       let supportZoom = false;
       let supportLensSwitch = false;
       let hwZoom = { min: 1, max: 1 };
@@ -578,7 +669,9 @@
         const parts = [];
         if (facingMode === "user") parts.push("scaleX(-1)");
         if (digitalScale > 1.01) parts.push("scale(" + digitalScale + ")");
-        video.style.transform = parts.length ? parts.join(" ") : "none";
+        const transform = parts.length ? parts.join(" ") : "none";
+        video.style.transform = transform;
+        videoBlur.style.transform = transform;
       }
 
       function updateZoomButtons() {
@@ -593,19 +686,39 @@
         );
       }
 
-      function updateZoomStatus() {
-        zoomStatus.textContent =
-          zoomKind === "physical" ? "物理变焦" : "数码变焦";
+      function updateFocalAvailability() {
+        focalRow.classList.toggle("front-locked", facingMode === "user");
       }
 
-      function updateFocalAvailability() {
-        const front = facingMode === "user";
-        focalRow.classList.toggle("front-locked", front);
-        if (front) {
-          zoomStatus.textContent = "";
-        } else {
-          updateZoomStatus();
-        }
+      function formatAperture(value) {
+        const n = Number(value);
+        if (Number.isInteger(n)) return "f/" + n;
+        return "f/" + n.toFixed(1).replace(/\.0$/, "");
+      }
+
+      function getDofStrength() {
+        // f/1.4 → 1（浅景深），f/16 → 0（深景深）
+        return 1 - apertureIndex / (APERTURE_STOPS.length - 1);
+      }
+
+      function updateApertureUI() {
+        const f = APERTURE_STOPS[apertureIndex];
+        apertureLabel.textContent = formatAperture(f);
+        apertureSlider.value = String(apertureIndex);
+        const strength = getDofStrength();
+        document.documentElement.style.setProperty(
+          "--dof-blur",
+          (strength * 16).toFixed(1) + "px"
+        );
+        document.documentElement.style.setProperty(
+          "--dof-amount",
+          strength.toFixed(3)
+        );
+      }
+
+      function setApertureIndex(index) {
+        apertureIndex = Math.max(0, Math.min(APERTURE_STOPS.length - 1, index | 0));
+        updateApertureUI();
       }
 
       async function openStream(constraints) {
@@ -638,13 +751,21 @@
         const prev = stream;
         stream = next;
         video.srcObject = stream;
+        videoBlur.srcObject = stream;
         try {
-          await video.play();
+          await Promise.all([
+            video.play(),
+            videoBlur.play().catch(function () {}),
+          ]);
         } catch (err) {
           next.getTracks().forEach(function (t) { t.stop(); });
           stream = prev;
           video.srcObject = prev;
-          if (prev) await video.play().catch(function () {});
+          videoBlur.srcObject = prev;
+          if (prev) {
+            await video.play().catch(function () {});
+            await videoBlur.play().catch(function () {});
+          }
           throw err;
         }
 
@@ -772,10 +893,8 @@
             try {
               await track.applyConstraints({ advanced: [{ zoom: z }] });
               digitalScale = 1;
-              zoomKind = "physical";
               updatePreviewTransform();
               updateZoomButtons();
-              updateZoomStatus();
               return;
             } catch (_) {
               // 继续尝试切 device / 数字变焦
@@ -792,7 +911,6 @@
 
           if (switched) {
             digitalScale = 1;
-            zoomKind = "physical";
             refreshHwZoom();
             if (supportZoom) {
               const track = getTrack();
@@ -804,18 +922,14 @@
             }
           } else if (factor < 1) {
             digitalScale = 1;
-            zoomKind = supportZoom || supportLensSwitch ? "physical" : "digital";
           } else if (Math.abs(factor - 1) < 0.05) {
             digitalScale = 1;
-            zoomKind = supportZoom || supportLensSwitch ? "physical" : "digital";
           } else {
             digitalScale = factor;
-            zoomKind = "digital";
           }
 
           updatePreviewTransform();
           updateZoomButtons();
-          updateZoomStatus();
         } finally {
           zooming = false;
         }
@@ -848,9 +962,6 @@
         if (supportZoom && hwZoom.min < 0.99 && hwZoom.max > 1.5) {
           supportLensSwitch = true;
         }
-
-        zoomKind = supportZoom || supportLensSwitch ? "physical" : "digital";
-        updateZoomStatus();
       }
 
       async function startCamera() {
@@ -875,6 +986,8 @@
 
           shutter.disabled = false;
           flipBtn.disabled = false;
+          topBar.classList.add("show");
+          updateApertureUI();
         } catch (err) {
           if (stream) {
             stream.getTracks().forEach(function (t) { t.stop(); });
@@ -915,20 +1028,7 @@
         }
       }
 
-      function captureFrame() {
-        const width = video.videoWidth;
-        const height = video.videoHeight;
-        if (!width || !height) throw new Error("画面还没就绪");
-
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext("2d");
-
-        if (facingMode === "user") {
-          ctx.translate(width, 0);
-          ctx.scale(-1, 1);
-        }
-
+      function drawVideoFrame(ctx, width, height) {
         if (digitalScale > 1.01) {
           const cropW = width / digitalScale;
           const cropH = height / digitalScale;
@@ -938,6 +1038,69 @@
         } else {
           ctx.drawImage(video, 0, 0, width, height);
         }
+      }
+
+      function captureFrame() {
+        const width = video.videoWidth;
+        const height = video.videoHeight;
+        if (!width || !height) throw new Error("画面还没就绪");
+
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        const strength = getDofStrength();
+
+        ctx.save();
+        if (facingMode === "user") {
+          ctx.translate(width, 0);
+          ctx.scale(-1, 1);
+        }
+
+        if (strength < 0.05) {
+          drawVideoFrame(ctx, width, height);
+          ctx.restore();
+          return;
+        }
+
+        // 先画虚化层，再用径向蒙版叠清晰主体
+        const blurPx = Math.max(2, strength * Math.min(width, height) * 0.012);
+        ctx.filter = "blur(" + blurPx.toFixed(1) + "px)";
+        drawVideoFrame(ctx, width, height);
+        ctx.filter = "none";
+
+        const sharp = document.createElement("canvas");
+        sharp.width = width;
+        sharp.height = height;
+        const sctx = sharp.getContext("2d");
+        if (facingMode === "user") {
+          sctx.translate(width, 0);
+          sctx.scale(-1, 1);
+        }
+        drawVideoFrame(sctx, width, height);
+
+        const mask = document.createElement("canvas");
+        mask.width = width;
+        mask.height = height;
+        const mctx = mask.getContext("2d");
+        const grd = mctx.createRadialGradient(
+          width * 0.5,
+          height * 0.42,
+          Math.min(width, height) * 0.12,
+          width * 0.5,
+          height * 0.42,
+          Math.min(width, height) * 0.42
+        );
+        grd.addColorStop(0, "rgba(0,0,0,1)");
+        grd.addColorStop(0.55, "rgba(0,0,0," + (0.85 - strength * 0.2).toFixed(2) + ")");
+        grd.addColorStop(1, "rgba(0,0,0,0)");
+        mctx.fillStyle = grd;
+        mctx.fillRect(0, 0, width, height);
+        sctx.globalCompositeOperation = "destination-in";
+        sctx.setTransform(1, 0, 0, 1, 0, 0);
+        sctx.drawImage(mask, 0, 0);
+
+        ctx.drawImage(sharp, 0, 0);
+        ctx.restore();
       }
 
       function canvasToBlob() {
@@ -1009,7 +1172,6 @@
 
       updateModeButtons();
       renderFocalButtons();
-      updateZoomStatus();
 
       document.addEventListener("visibilitychange", function () {
         if (!document.hidden && stream) video.play().catch(function () {});
