@@ -29,7 +29,9 @@
     html,
     body {
       margin: 0;
+      width: 100%;
       height: 100%;
+      height: 100dvh;
       background: #000;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       overflow: hidden;
@@ -40,9 +42,11 @@
     }
 
     #app {
-      position: relative;
+      position: fixed;
+      inset: 0;
       width: 100%;
       height: 100%;
+      height: 100dvh;
       background: #000;
       overflow: hidden;
     }
@@ -57,10 +61,10 @@
     #preview,
     #previewBlur {
       position: absolute;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
+      top: 50%;
+      left: 50%;
+      width: auto;
+      height: auto;
       min-width: 100%;
       min-height: 100%;
       max-width: none;
@@ -68,40 +72,32 @@
       object-fit: cover;
       object-position: center center;
       background: #000;
+      transform: translate(-50%, -50%);
       transform-origin: center center;
-      transition: transform 0.12s ease-out;
-      opacity: 0;
-    }
-
-    #preview.ready,
-    #previewBlur.ready {
-      opacity: 1;
+      transition: none;
     }
 
     #previewBlur {
       filter: blur(var(--dof-blur));
       -webkit-filter: blur(var(--dof-blur));
-      opacity: 0;
+      opacity: var(--dof-amount);
       pointer-events: none;
       will-change: filter, opacity;
+      /* 柔和周边虚化，避免看起来像中间小窗 */
       -webkit-mask-image: radial-gradient(
-        ellipse 42% 38% at 50% 42%,
+        ellipse 78% 68% at 50% 45%,
         transparent 0%,
-        transparent 35%,
-        #000 78%,
+        transparent 48%,
+        rgba(0, 0, 0, 0.55) 78%,
         #000 100%
       );
       mask-image: radial-gradient(
-        ellipse 42% 38% at 50% 42%,
+        ellipse 78% 68% at 50% 45%,
         transparent 0%,
-        transparent 35%,
-        #000 78%,
+        transparent 48%,
+        rgba(0, 0, 0, 0.55) 78%,
         #000 100%
       );
-    }
-
-    #previewBlur.ready {
-      opacity: var(--dof-amount);
     }
 
     #overlay {
@@ -713,13 +709,54 @@
         await applyZoomFactor(nextZoom);
       }
 
+      function layoutVideos() {
+        const stageEl = document.getElementById("stage");
+        const sw = stageEl.clientWidth || window.innerWidth || 1;
+        const sh = stageEl.clientHeight || window.innerHeight || 1;
+        const vw = video.videoWidth;
+        const vh = video.videoHeight;
+        if (!vw || !vh) return;
+
+        // cover：短边撑满，再居中
+        const scale = Math.max(sw / vw, sh / vh);
+        const w = Math.ceil(vw * scale);
+        const h = Math.ceil(vh * scale);
+
+        [video, videoBlur].forEach(function (el) {
+          el.style.top = "50%";
+          el.style.left = "50%";
+          el.style.width = w + "px";
+          el.style.height = h + "px";
+          el.style.minWidth = "0";
+          el.style.minHeight = "0";
+          el.style.maxWidth = "none";
+          el.style.maxHeight = "none";
+          el.style.objectFit = "fill";
+        });
+        updatePreviewTransform();
+      }
+
       function updatePreviewTransform() {
-        const parts = [];
+        const parts = ["translate(-50%, -50%)"];
         if (facingMode === "user") parts.push("scaleX(-1)");
         if (digitalScale > 1.01) parts.push("scale(" + digitalScale + ")");
-        const transform = parts.length ? parts.join(" ") : "none";
+        const transform = parts.join(" ");
         video.style.transform = transform;
         videoBlur.style.transform = transform;
+      }
+
+      async function resumePreview() {
+        if (!stream) return;
+        try {
+          await Promise.all([
+            video.play().catch(function () {}),
+            videoBlur.play().catch(function () {}),
+          ]);
+        } catch (_) {}
+        requestAnimationFrame(function () {
+          layoutVideos();
+          requestAnimationFrame(layoutVideos);
+        });
       }
 
       function updateZoomButtons() {
@@ -765,7 +802,7 @@
       function applySoftwareDof(strength) {
         document.documentElement.style.setProperty(
           "--dof-blur",
-          (strength * 18).toFixed(2) + "px"
+          (strength * 10).toFixed(2) + "px"
         );
         document.documentElement.style.setProperty(
           "--dof-amount",
@@ -808,19 +845,16 @@
         updateApertureUI(Object.assign({ keepSlider: true }, options || {}));
       }
 
-      function markVideosReady() {
-        video.classList.add("ready");
-        videoBlur.classList.add("ready");
+      function onVideoGeometry() {
+        layoutVideos();
       }
 
-      function bindVideoReady(el) {
-        el.addEventListener("loadedmetadata", markVideosReady);
-        el.addEventListener("playing", markVideosReady);
-        el.addEventListener("resize", markVideosReady);
-      }
-
-      bindVideoReady(video);
-      bindVideoReady(videoBlur);
+      video.addEventListener("loadedmetadata", onVideoGeometry);
+      video.addEventListener("loadeddata", onVideoGeometry);
+      video.addEventListener("playing", onVideoGeometry);
+      video.addEventListener("resize", onVideoGeometry);
+      videoBlur.addEventListener("loadedmetadata", onVideoGeometry);
+      videoBlur.addEventListener("playing", onVideoGeometry);
 
       async function openStream(constraints) {
         return navigator.mediaDevices.getUserMedia(constraints);
@@ -851,8 +885,6 @@
 
         const prev = stream;
         stream = next;
-        video.classList.remove("ready");
-        videoBlur.classList.remove("ready");
         video.srcObject = stream;
         videoBlur.srcObject = stream;
         try {
@@ -860,7 +892,8 @@
             video.play(),
             videoBlur.play().catch(function () {}),
           ]);
-          markVideosReady();
+          layoutVideos();
+          requestAnimationFrame(layoutVideos);
         } catch (err) {
           next.getTracks().forEach(function (t) { t.stop(); });
           stream = prev;
@@ -1314,10 +1347,16 @@
       apertureSlider.addEventListener("touchend", onApertureCommit);
 
       document.addEventListener("visibilitychange", function () {
-        if (!document.hidden && stream) {
-          video.play().catch(function () {});
-          videoBlur.play().catch(function () {});
-        }
+        if (!document.hidden) resumePreview();
+      });
+      window.addEventListener("pageshow", function () {
+        resumePreview();
+      });
+      window.addEventListener("resize", function () {
+        layoutVideos();
+      });
+      window.addEventListener("orientationchange", function () {
+        setTimeout(layoutVideos, 120);
       });
 
       // 直接进入拍摄页并尝试开相机；失败再显示轻触重试
