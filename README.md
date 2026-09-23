@@ -1,23 +1,19 @@
 # Doyen
 
-网页版相机：打开即拍摄页，底部快门拍照，可分享/保存到相册。
+网页版相机：先做环境检测，再进入拍摄；可分享/保存到相册。
 
 ## 功能
 
-- 进入即取景（权限失败时轻触重试）
-- 前后摄像头切换（前置时隐藏焦段控制）
-- 拍摄模式：
-  - **风景**（默认）：超广 13mm / 广角 24mm / 中景 35mm / 压缩 70mm
-  - **人像**：环境 35mm / 标准 50mm / 经典 85mm / 特写 135mm
-- **导演指导**：本地 Florence-2 看当前取景，给出艺术拍摄建议（首次下载模型，之后可离线推理）
-- 默认 **风景 · 广角 24mm**
+- 进页检测：HTTPS、相机 API、WebGPU、Transformers.js CDN、hf-mirror
+- 全屏取景、快门拍照、前后摄像头
+- 风景 / 人像焦段预设（默认风景 · 广角 24mm）
+- **辅助拍摄**：本地 Florence-2 看当前取景并给出建议（需检测通过；桌面 Chrome 最稳）
 
-## 导演指导说明
+## 辅助拍摄
 
-- 引擎：[Transformers.js](https://huggingface.co/docs/transformers.js) + [Florence-2-base-ft](https://huggingface.co/onnx-community/Florence-2-base-ft)（约数百 MB）
-- 需要 **WebGPU**（推荐桌面 Chrome / Edge；部分新版 Safari 可用）
-- 点「导演」→ 截取当前帧 → 本地看图 → 中文建议
-- 画面与推理都在浏览器内，不上传服务器
+- 引擎：Transformers.js + Florence-2-base-ft（首次下载约数百 MB）
+- 推荐 **桌面 Chrome / Edge**（WebGPU）
+- iPhone Safari 常因 WebGPU / 大模型加载失败；检测页会提前标红
 
 ## License
 

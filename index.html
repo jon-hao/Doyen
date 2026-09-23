@@ -306,6 +306,90 @@
       color: #fbbf24;
     }
 
+    #probe {
+      position: absolute;
+      inset: 0;
+      display: none;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      gap: 12px;
+      padding: 28px 20px calc(28px + var(--safe-bottom));
+      text-align: center;
+      color: #fff;
+      background: rgba(0, 0, 0, 0.96);
+      z-index: 6;
+      touch-action: manipulation;
+    }
+
+    #probe.show { display: flex; }
+
+    #probe h2 {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 600;
+    }
+
+    #probeStatus {
+      margin: 0;
+      max-width: 22em;
+      line-height: 1.5;
+      color: rgba(255, 255, 255, 0.72);
+      font-size: 15px;
+    }
+
+    #probeList {
+      width: min(400px, 100%);
+      margin: 4px 0 0;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.08);
+      text-align: left;
+      list-style: none;
+    }
+
+    #probeList li {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 0;
+      font-size: 13px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      line-height: 1.35;
+    }
+
+    #probeList li:last-child { border-bottom: 0; }
+    #probeList .ok { color: #4ade80; font-weight: 600; text-align: right; }
+    #probeList .warn { color: #fbbf24; font-weight: 600; text-align: right; }
+    #probeList .no { color: #f87171; font-weight: 600; text-align: right; }
+    #probeList .label { color: rgba(255, 255, 255, 0.78); }
+
+    #probeNote {
+      margin: 0;
+      max-width: 24em;
+      font-size: 12px;
+      line-height: 1.45;
+      color: rgba(255, 255, 255, 0.55);
+    }
+
+    #probeEnter {
+      margin-top: 6px;
+      border: 0;
+      border-radius: 12px;
+      padding: 12px 22px;
+      font-size: 16px;
+      font-weight: 600;
+      color: #111;
+      background: #fff;
+    }
+
+    #probeEnter:disabled {
+      opacity: 0.4;
+    }
+
+    #probeEnter[hidden] { display: none; }
+
+
     #flash {
       position: absolute;
       inset: 0;
@@ -463,7 +547,7 @@
       <div id="toast"></div>
       <div id="coachPanel" aria-live="polite">
         <header>
-          <h2>导演指导</h2>
+          <h2>辅助拍摄</h2>
           <button id="coachClose" type="button" aria-label="关闭">×</button>
         </header>
         <div id="coachProgress">
@@ -473,7 +557,7 @@
         <p id="coachCaption"></p>
         <ol id="coachTips"></ol>
       </div>
-      <div id="controls" class="show">
+      <div id="controls">
         <div id="focalRow">
           <div id="modeBar">
             <button type="button" class="mode-btn active" data-mode="landscape">风景</button>
@@ -511,6 +595,14 @@
       <p>轻触开启相机</p>
       <p id="secureHint">需要 HTTPS 才能使用相机</p>
     </div>
+
+    <div id="probe" class="show">
+      <h2>环境检测</h2>
+      <p id="probeStatus">正在检测设备与依赖…</p>
+      <ul id="probeList" hidden></ul>
+      <p id="probeNote" hidden></p>
+      <button id="probeEnter" type="button" hidden>进入拍摄</button>
+    </div>
   </div>
 
   <script>
@@ -530,6 +622,11 @@
       const toast = document.getElementById("toast");
       const gate = document.getElementById("gate");
       const secureHint = document.getElementById("secureHint");
+      const probe = document.getElementById("probe");
+      const probeStatus = document.getElementById("probeStatus");
+      const probeList = document.getElementById("probeList");
+      const probeNote = document.getElementById("probeNote");
+      const probeEnter = document.getElementById("probeEnter");
       const flash = document.getElementById("flash");
       const controls = document.getElementById("controls");
       const zoomBar = document.getElementById("zoomBar");
@@ -577,6 +674,8 @@
       let lenses = [];
       let currentLens = null;
       let currentDeviceId = "";
+      /** @type {null | {https:boolean,cameraApi:boolean,webgpu:boolean,transformers:boolean,hfMirror:boolean,assistOk:boolean,detail:string}} */
+      let deviceReport = null;
 
       function currentPresets() {
         return MODE_PRESETS[shootMode] || MODE_PRESETS.landscape;
@@ -1046,6 +1145,179 @@
         }
       }
 
+      function probeRow(label, state, detail) {
+        const cls = state === "ok" ? "ok" : state === "warn" ? "warn" : "no";
+        return (
+          '<li><span class="label">' +
+          label +
+          '</span><span class="' +
+          cls +
+          '">' +
+          detail +
+          "</span></li>"
+        );
+      }
+
+      async function checkWebGPU() {
+        try {
+          if (!navigator.gpu) return { ok: false, detail: "不支持 navigator.gpu" };
+          const adapter = await navigator.gpu.requestAdapter();
+          if (!adapter) return { ok: false, detail: "无可用 GPU 适配器" };
+          return { ok: true, detail: "可用" };
+        } catch (err) {
+          return {
+            ok: false,
+            detail: (err && err.message) || "检测失败",
+          };
+        }
+      }
+
+      async function checkTransformersCdn() {
+        try {
+          const mod = await import(
+            "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.1/+esm"
+          );
+          if (!mod || !mod.env) {
+            return { ok: false, detail: "模块不完整" };
+          }
+          return { ok: true, detail: "CDN 可加载" };
+        } catch (err) {
+          return {
+            ok: false,
+            detail: (err && err.message) || "Load failed",
+          };
+        }
+      }
+
+      async function checkHfMirror() {
+        const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+        const timer = ctrl
+          ? setTimeout(function () {
+              ctrl.abort();
+            }, 8000)
+          : null;
+        try {
+          const res = await fetch(
+            "https://hf-mirror.com/onnx-community/Florence-2-base-ft/resolve/main/config.json",
+            {
+              method: "GET",
+              mode: "cors",
+              cache: "no-store",
+              signal: ctrl ? ctrl.signal : undefined,
+            }
+          );
+          if (timer) clearTimeout(timer);
+          if (!res.ok) {
+            return { ok: false, detail: "HTTP " + res.status };
+          }
+          return { ok: true, detail: "可访问" };
+        } catch (err) {
+          if (timer) clearTimeout(timer);
+          const name = err && err.name;
+          if (name === "AbortError") {
+            return { ok: false, detail: "超时" };
+          }
+          return {
+            ok: false,
+            detail: (err && err.message) || "不可达",
+          };
+        }
+      }
+
+      async function runDeviceProbe() {
+        probe.classList.add("show");
+        gate.classList.remove("show");
+        controls.classList.remove("show");
+        probeEnter.hidden = true;
+        probeList.hidden = true;
+        probeNote.hidden = true;
+        probeStatus.textContent = "正在检测设备与依赖…";
+
+        const httpsOk = isSecureEnough();
+        const cameraApi = !!(
+          navigator.mediaDevices && navigator.mediaDevices.getUserMedia
+        );
+
+        probeStatus.textContent = "检测 WebGPU…";
+        const gpu = await checkWebGPU();
+
+        probeStatus.textContent = "检测 Transformers.js CDN…";
+        const tf = await checkTransformersCdn();
+
+        probeStatus.textContent = "检测模型镜像 hf-mirror…";
+        const mirror = await checkHfMirror();
+
+        // 辅助拍摄：CDN + 镜像必须过；WebGPU 没有也可试 WASM（标 warn）
+        const assistOk = tf.ok && mirror.ok;
+        const assistDetail = !tf.ok
+          ? "引擎不可用：" + tf.detail
+          : !mirror.ok
+            ? "模型源不可用：" + mirror.detail
+            : gpu.ok
+              ? "可用（WebGPU）"
+              : "可用（将走 WASM，较慢）";
+
+        deviceReport = {
+          https: httpsOk,
+          cameraApi: cameraApi,
+          webgpu: gpu.ok,
+          transformers: tf.ok,
+          hfMirror: mirror.ok,
+          assistOk: assistOk,
+          detail: assistDetail,
+        };
+
+        probeList.hidden = false;
+        probeList.innerHTML =
+          probeRow("HTTPS / 安全上下文", httpsOk ? "ok" : "no", httpsOk ? "通过" : "失败") +
+          probeRow(
+            "相机 API",
+            cameraApi ? "ok" : "no",
+            cameraApi ? "getUserMedia" : "不支持"
+          ) +
+          probeRow(
+            "WebGPU",
+            gpu.ok ? "ok" : "warn",
+            gpu.detail
+          ) +
+          probeRow(
+            "Transformers.js",
+            tf.ok ? "ok" : "no",
+            tf.detail
+          ) +
+          probeRow(
+            "hf-mirror 模型源",
+            mirror.ok ? "ok" : "no",
+            mirror.detail
+          ) +
+          probeRow(
+            "辅助拍摄",
+            assistOk ? (gpu.ok ? "ok" : "warn") : "no",
+            assistDetail
+          );
+
+        probeNote.hidden = false;
+        if (!assistOk) {
+          probeNote.textContent =
+            "当前环境无法使用「辅助拍摄」。拍照功能仍可进入；建议用桌面 Chrome 打开本页再测辅助拍摄。";
+        } else if (!gpu.ok) {
+          probeNote.textContent =
+            "无 WebGPU，辅助拍摄将尝试 WASM（首次下载大、偏慢）。建议桌面 Chrome 以获得更好体验。";
+        } else {
+          probeNote.textContent =
+            "环境正常。进入拍摄后点「辅助拍摄」会首次下载视觉模型（约数百 MB）。";
+        }
+
+        probeStatus.textContent = "检测完成";
+        probeEnter.hidden = false;
+        probeEnter.disabled = !(httpsOk && cameraApi);
+        if (!httpsOk || !cameraApi) {
+          probeEnter.textContent = "环境不满足，无法拍摄";
+        } else {
+          probeEnter.textContent = "进入拍摄";
+        }
+      }
+
       async function startCamera() {
         if (stream || starting) return;
         starting = true;
@@ -1056,6 +1328,7 @@
           if (!isSecureEnough()) throw new Error("需要 HTTPS 才能使用相机");
 
           gate.classList.remove("show");
+          probe.classList.remove("show");
           controls.classList.add("show");
 
           await openCamera("environment");
@@ -1068,12 +1341,20 @@
 
           shutter.disabled = false;
           flipBtn.disabled = false;
-          coachBtn.disabled = false;
+          // 辅助拍摄：检测通过才启用
+          coachBtn.disabled = !(deviceReport && deviceReport.assistOk);
+          if (deviceReport && !deviceReport.assistOk) {
+            coachBtn.title = deviceReport.detail || "当前环境不支持辅助拍摄";
+          } else {
+            coachBtn.title = "";
+          }
         } catch (err) {
           if (stream) {
             stream.getTracks().forEach(function (t) { t.stop(); });
             stream = null;
           }
+          controls.classList.remove("show");
+          probe.classList.remove("show");
           gate.classList.add("show");
           const msg = (err && err.message) || "无法打开相机";
           const gateText = gate.querySelector("p:not(#secureHint)");
@@ -1244,9 +1525,9 @@
         coachPanel.classList.add("show");
         coachPanel.classList.add("err");
         coachCaption.classList.add("err");
-        coachCaption.textContent = message || "导演助手出错";
+        coachCaption.textContent = message || "辅助拍摄出错";
         coachTips.innerHTML = "";
-        showToast(message || "导演助手出错", "err");
+        showToast(message || "辅助拍摄出错", "err");
       }
 
       function clearCoachErrorState() {
@@ -1301,7 +1582,7 @@
 
       async function ensureCoachEngine() {
         if (coachEngine) return coachEngine;
-        setCoachIndeterminate("加载导演引擎…");
+        setCoachIndeterminate("加载辅助拍摄引擎…");
         try {
           coachEngine = await import(coachAssetUrl("coach-engine.js"));
           coachTipsMod = await import(coachAssetUrl("coach-tips.js"));
@@ -1328,6 +1609,13 @@
 
       async function runCoach() {
         if (!stream || coachRunning) return;
+        if (deviceReport && !deviceReport.assistOk) {
+          showCoachError(
+            "当前环境不支持辅助拍摄：" +
+              (deviceReport.detail || "请用桌面 Chrome 打开后再试")
+          );
+          return;
+        }
         if (facingMode === "user") {
           showToast("请切到后置镜头再使用辅助拍摄", "err");
           return;
@@ -1378,6 +1666,10 @@
 
 
       gate.addEventListener("click", startCamera);
+      probeEnter.addEventListener("click", function () {
+        if (probeEnter.disabled) return;
+        startCamera();
+      });
       shutter.addEventListener("click", onShutter);
       flipBtn.addEventListener("click", flipCamera);
 
@@ -1406,8 +1698,8 @@
         setTimeout(layoutVideos, 120);
       });
 
-      // 直接进入拍摄页并尝试开相机；失败再显示轻触重试
-      startCamera();
+      // 先进检测页，再进入拍摄
+      runDeviceProbe();
     })();
   </script>
 </body>
