@@ -9,7 +9,15 @@
 - 拍摄模式：
   - **风景**（默认）：超广 13mm / 广角 24mm / 中景 35mm / 压缩 70mm
   - **人像**：环境 35mm / 标准 50mm / 经典 85mm / 特写 135mm
+- **导演指导**：本地 Florence-2 看当前取景，给出艺术拍摄建议（首次下载模型，之后可离线推理）
 - 默认 **风景 · 广角 24mm**
+
+## 导演指导说明
+
+- 引擎：[Transformers.js](https://huggingface.co/docs/transformers.js) + [Florence-2-base-ft](https://huggingface.co/onnx-community/Florence-2-base-ft)（约数百 MB）
+- 需要 **WebGPU**（推荐桌面 Chrome / Edge；部分新版 Safari 可用）
+- 点「导演」→ 截取当前帧 → 本地看图 → 中文建议
+- 画面与推理都在浏览器内，不上传服务器
 
 ## License
 
@@ -18,5 +26,3 @@
 ## 在线使用
 
 https://jon-hao.github.io/Doyen/
-
-> 说明：当前 GitHub 账号为 Free 计划，私有仓库无法发布 GitHub Pages。若要将源码设为 private 并继续用 Pages，需要升级到 Pro（站点 URL 仍对公网可访问）；真正私有站点需要 Enterprise Cloud。

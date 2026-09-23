@@ -315,6 +315,114 @@
 
     #flash.show { opacity: 0.85; }
 
+
+    #coachBtn {
+      justify-self: start;
+      min-width: 48px;
+      height: 48px;
+      border: 0;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.18);
+      color: #fff;
+      font-size: 14px;
+      font-weight: 700;
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      padding: 0 8px;
+    }
+
+    #coachBtn:disabled { opacity: 0.35; }
+
+    #coachBtn.busy {
+      color: #f5d76e;
+    }
+
+    #coachPanel {
+      position: absolute;
+      left: 12px;
+      right: 12px;
+      bottom: calc(120px + var(--safe-bottom));
+      z-index: 4;
+      display: none;
+      flex-direction: column;
+      gap: 10px;
+      padding: 14px 16px 16px;
+      border-radius: 18px;
+      background: rgba(0, 0, 0, 0.72);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      color: #fff;
+      max-height: 42vh;
+      overflow: auto;
+      pointer-events: auto;
+    }
+
+    #coachPanel.show { display: flex; }
+
+    #coachPanel header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    #coachPanel h2 {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 700;
+    }
+
+    #coachClose {
+      border: 0;
+      background: transparent;
+      color: rgba(255, 255, 255, 0.7);
+      font-size: 20px;
+      line-height: 1;
+      padding: 4px 6px;
+    }
+
+    #coachProgress {
+      display: none;
+      font-size: 12px;
+      color: rgba(255, 255, 255, 0.7);
+      line-height: 1.4;
+    }
+
+    #coachProgress.show { display: block; }
+
+    #coachProgressBar {
+      margin-top: 8px;
+      height: 4px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.15);
+      overflow: hidden;
+    }
+
+    #coachProgressBar > i {
+      display: block;
+      height: 100%;
+      width: 0%;
+      background: #f5d76e;
+      border-radius: 999px;
+      transition: width 0.15s ease-out;
+    }
+
+    #coachCaption {
+      margin: 0;
+      font-size: 12px;
+      line-height: 1.45;
+      color: rgba(255, 255, 255, 0.62);
+    }
+
+    #coachTips {
+      margin: 0;
+      padding-left: 1.1em;
+      font-size: 14px;
+      line-height: 1.55;
+    }
+
+    #coachTips li { margin: 0 0 6px; }
+
     canvas#shot { display: none; }
   </style>
 </head>
@@ -328,6 +436,18 @@
 
     <div id="overlay">
       <div id="toast"></div>
+      <div id="coachPanel" aria-live="polite">
+        <header>
+          <h2>导演指导</h2>
+          <button id="coachClose" type="button" aria-label="关闭">×</button>
+        </header>
+        <div id="coachProgress">
+          <span id="coachProgressText">准备中…</span>
+          <div id="coachProgressBar"><i id="coachProgressFill"></i></div>
+        </div>
+        <p id="coachCaption"></p>
+        <ol id="coachTips"></ol>
+      </div>
       <div id="controls" class="show">
         <div id="focalRow">
           <div id="modeBar">
@@ -339,7 +459,7 @@
           </div>
         </div>
         <div id="bottomRow">
-          <div></div>
+          <button id="coachBtn" type="button" aria-label="艺术指导" disabled>导演</button>
           <button id="shutter" type="button" aria-label="拍照" disabled></button>
           <button id="flipBtn" type="button" aria-label="切换摄像头" disabled>
             <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -374,6 +494,14 @@
       const canvas = document.getElementById("shot");
       const shutter = document.getElementById("shutter");
       const flipBtn = document.getElementById("flipBtn");
+      const coachBtn = document.getElementById("coachBtn");
+      const coachPanel = document.getElementById("coachPanel");
+      const coachClose = document.getElementById("coachClose");
+      const coachProgress = document.getElementById("coachProgress");
+      const coachProgressText = document.getElementById("coachProgressText");
+      const coachProgressFill = document.getElementById("coachProgressFill");
+      const coachCaption = document.getElementById("coachCaption");
+      const coachTips = document.getElementById("coachTips");
       const toast = document.getElementById("toast");
       const gate = document.getElementById("gate");
       const secureHint = document.getElementById("secureHint");
@@ -915,6 +1043,7 @@
 
           shutter.disabled = false;
           flipBtn.disabled = false;
+          coachBtn.disabled = false;
         } catch (err) {
           if (stream) {
             stream.getTracks().forEach(function (t) { t.stop(); });
@@ -1033,6 +1162,206 @@
           shutter.disabled = false;
         }
       }
+
+
+      let coachWorker = null;
+      let coachReady = false;
+      let coachLoading = false;
+      let coachRunning = false;
+      let coachProgressTotal = 0;
+      let coachProgressDone = 0;
+
+      function setCoachProgress(text, ratio) {
+        coachProgress.classList.add("show");
+        coachProgressText.textContent = text || "";
+        if (typeof ratio === "number") {
+          coachProgressFill.style.width = Math.round(ratio * 100) + "%";
+        }
+      }
+
+      function hideCoachProgress() {
+        coachProgress.classList.remove("show");
+        coachProgressFill.style.width = "0%";
+      }
+
+      function showCoachPanel() {
+        coachPanel.classList.add("show");
+      }
+
+      function hideCoachPanel() {
+        coachPanel.classList.remove("show");
+      }
+
+      function renderCoachResult(payload) {
+        hideCoachProgress();
+        const caption = (payload && payload.caption) || "";
+        const tips = (payload && payload.tips) || [];
+        coachCaption.textContent = caption
+          ? "镜头所见：" + caption
+          : "已分析当前画面";
+        coachTips.innerHTML = "";
+        tips.forEach(function (tip) {
+          const li = document.createElement("li");
+          li.textContent = tip;
+          coachTips.appendChild(li);
+        });
+        showCoachPanel();
+      }
+
+      function ensureCoachWorker() {
+        if (coachWorker) return coachWorker;
+        coachWorker = new Worker("./coach-worker.js", { type: "module" });
+        coachWorker.onmessage = function (e) {
+          const msg = e.data || {};
+          if (msg.status === "progress" && msg.progress != null) {
+            const file = msg.file ? String(msg.file).split("/").pop() : "模型";
+            setCoachProgress(
+              "下载 " + file + "…",
+              Math.max(0, Math.min(1, Number(msg.progress) || 0))
+            );
+          } else if (msg.status === "initiate") {
+            coachProgressTotal += 1;
+          } else if (msg.status === "done") {
+            coachProgressDone += 1;
+            if (coachProgressTotal > 0) {
+              setCoachProgress(
+                "模型文件 " + coachProgressDone + "/" + coachProgressTotal,
+                coachProgressDone / coachProgressTotal
+              );
+            }
+          } else if (msg.status === "loading" && msg.data) {
+            setCoachProgress(String(msg.data), null);
+          } else if (msg.status === "ready") {
+            coachReady = true;
+            coachLoading = false;
+            setCoachProgress("模型就绪，正在看镜头…", 1);
+          } else if (msg.status === "complete") {
+            coachRunning = false;
+            coachBtn.classList.remove("busy");
+            coachBtn.disabled = false;
+            import("./coach-tips.js")
+              .then(function (mod) {
+                const focal = findFocal(zoomFactor);
+                const built = mod.buildCoachTips(msg.result, {
+                  mode: shootMode,
+                  focal: focal,
+                });
+                renderCoachResult(built);
+              })
+              .catch(function (err) {
+                showToast((err && err.message) || "生成建议失败", "err");
+              });
+          } else if (msg.status === "error") {
+            coachLoading = false;
+            coachRunning = false;
+            coachBtn.classList.remove("busy");
+            coachBtn.disabled = false;
+            hideCoachProgress();
+            showToast(msg.error || "导演助手出错", "err");
+          }
+        };
+        coachWorker.onerror = function (err) {
+          coachLoading = false;
+          coachRunning = false;
+          coachBtn.classList.remove("busy");
+          coachBtn.disabled = false;
+          showToast((err && err.message) || "Worker 加载失败", "err");
+        };
+        return coachWorker;
+      }
+
+      function frameToObjectUrl() {
+        captureFrame();
+        return new Promise(function (resolve, reject) {
+          canvas.toBlob(
+            function (blob) {
+              if (!blob) {
+                reject(new Error("截取画面失败"));
+                return;
+              }
+              resolve(URL.createObjectURL(blob));
+            },
+            "image/jpeg",
+            0.85
+          );
+        });
+      }
+
+      async function runCoach() {
+        if (!stream || coachRunning) return;
+        if (facingMode === "user") {
+          showToast("请切到后置镜头再请导演指导", "err");
+          return;
+        }
+        coachRunning = true;
+        coachBtn.disabled = true;
+        coachBtn.classList.add("busy");
+        showCoachPanel();
+        coachCaption.textContent = "";
+        coachTips.innerHTML = "";
+        setCoachProgress("准备本地视觉模型…", 0.02);
+
+        try {
+          const worker = ensureCoachWorker();
+          if (!coachReady && !coachLoading) {
+            coachLoading = true;
+            coachProgressTotal = 0;
+            coachProgressDone = 0;
+            worker.postMessage({ type: "load" });
+            // wait until ready or error via polling flag
+            await new Promise(function (resolve, reject) {
+              const t0 = Date.now();
+              const timer = setInterval(function () {
+                if (coachReady) {
+                  clearInterval(timer);
+                  resolve();
+                } else if (!coachLoading && !coachReady) {
+                  clearInterval(timer);
+                  reject(new Error("模型未能就绪"));
+                } else if (Date.now() - t0 > 300000) {
+                  clearInterval(timer);
+                  reject(new Error("模型加载超时"));
+                }
+              }, 200);
+            });
+          } else if (coachLoading) {
+            await new Promise(function (resolve, reject) {
+              const t0 = Date.now();
+              const timer = setInterval(function () {
+                if (coachReady) {
+                  clearInterval(timer);
+                  resolve();
+                } else if (!coachLoading) {
+                  clearInterval(timer);
+                  reject(new Error("模型未能就绪"));
+                } else if (Date.now() - t0 > 300000) {
+                  clearInterval(timer);
+                  reject(new Error("模型加载超时"));
+                }
+              }, 200);
+            });
+          }
+
+          setCoachProgress("正在看当前取景…", 0.92);
+          const url = await frameToObjectUrl();
+          worker.postMessage({ type: "analyze", data: { url: url } });
+          // revoke later
+          setTimeout(function () {
+            URL.revokeObjectURL(url);
+          }, 60000);
+        } catch (err) {
+          coachRunning = false;
+          coachLoading = false;
+          coachBtn.classList.remove("busy");
+          coachBtn.disabled = false;
+          hideCoachProgress();
+          showToast((err && err.message) || "指导失败", "err");
+        }
+      }
+
+      coachBtn.addEventListener("click", runCoach);
+      coachClose.addEventListener("click", hideCoachPanel);
+
 
       gate.addEventListener("click", startCamera);
       shutter.addEventListener("click", onShutter);
