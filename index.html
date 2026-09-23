@@ -253,17 +253,10 @@
       border-radius: 50%;
       background: rgba(255, 255, 255, 0.18);
       color: #fff;
-      padding: 0;
-      display: grid;
-      place-items: center;
+      font-size: 22px;
+      line-height: 1;
       backdrop-filter: blur(10px);
       -webkit-backdrop-filter: blur(10px);
-    }
-
-    #flipBtn svg {
-      width: 32px;
-      height: 32px;
-      display: block;
     }
 
     #flipBtn:disabled { opacity: 0.35; }
@@ -389,7 +382,16 @@
 
     #probeEnter[hidden] { display: none; }
 
-    #probeRetry {
+    #probeActions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 8px;
+      margin-top: 2px;
+    }
+
+    #probeRetry,
+    #probeClear {
       margin-top: 0;
       border: 0;
       border-radius: 12px;
@@ -400,7 +402,12 @@
       background: rgba(255, 255, 255, 0.16);
     }
 
-    #probeRetry[hidden] { display: none; }
+    #probeRetry[hidden],
+    #probeClear[hidden] { display: none; }
+
+    #probeClear:disabled {
+      opacity: 0.45;
+    }
 
 
     #flash {
@@ -493,6 +500,22 @@
       padding: 4px 6px;
     }
 
+    #coachHeaderActions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    #coachClear {
+      border: 0;
+      border-radius: 8px;
+      padding: 4px 8px;
+      font-size: 12px;
+      font-weight: 600;
+      color: rgba(255, 255, 255, 0.78);
+      background: rgba(255, 255, 255, 0.12);
+    }
+
     #coachProgress {
       display: none;
       font-size: 12px;
@@ -561,7 +584,10 @@
       <div id="coachPanel" aria-live="polite">
         <header>
           <h2>辅助拍摄</h2>
-          <button id="coachClose" type="button" aria-label="关闭">×</button>
+          <div id="coachHeaderActions">
+            <button id="coachClear" type="button">清除缓存</button>
+            <button id="coachClose" type="button" aria-label="关闭">×</button>
+          </div>
         </header>
         <div id="coachProgress">
           <span id="coachProgressText">准备中…</span>
@@ -583,22 +609,7 @@
         <div id="bottomRow">
           <button id="coachBtn" type="button" aria-label="辅助拍摄" disabled>辅助拍摄</button>
           <button id="shutter" type="button" aria-label="拍照" disabled></button>
-          <button id="flipBtn" type="button" aria-label="切换摄像头" disabled>
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                fill="currentColor"
-                d="M12 8a4 4 0 1 0 4 4 4 4 0 0 0-4-4zm0 6.2a2.2 2.2 0 1 1 2.2-2.2A2.2 2.2 0 0 1 12 14.2z"
-              />
-              <path
-                fill="currentColor"
-                d="M9.8 5.2 8.6 6.8H7a2.8 2.8 0 0 0-2.8 2.8v6.4A2.8 2.8 0 0 0 7 18.8h10a2.8 2.8 0 0 0 2.8-2.8V9.6A2.8 2.8 0 0 0 17 6.8h-1.6L14.2 5.2a1.4 1.4 0 0 0-1.1-.5h-2.2a1.4 1.4 0 0 0-1.1.5z"
-              />
-              <path
-                fill="currentColor"
-                d="M20.2 3.1v3.6h-1.7l.9-.9A6.6 6.6 0 0 0 12.2 3v1.7a4.9 4.9 0 0 1 5.2 1.7l-.9.9h3.7V3.1zM3.8 20.9v-3.6h1.7l-.9.9A6.6 6.6 0 0 0 11.8 21v-1.7a4.9 4.9 0 0 1-5.2-1.7l.9-.9H3.8v3.7z"
-              />
-            </svg>
-          </button>
+          <button id="flipBtn" type="button" aria-label="切换摄像头" disabled>⟲</button>
         </div>
       </div>
     </div>
@@ -615,7 +626,10 @@
       <ul id="probeList" hidden></ul>
       <p id="probeNote" hidden></p>
       <button id="probeEnter" type="button" hidden>进入拍摄</button>
-      <button id="probeRetry" type="button" hidden>重新检测</button>
+      <div id="probeActions">
+        <button id="probeRetry" type="button" hidden>重新检测</button>
+        <button id="probeClear" type="button" hidden>清除缓存</button>
+      </div>
     </div>
   </div>
 
@@ -628,6 +642,7 @@
       const coachBtn = document.getElementById("coachBtn");
       const coachPanel = document.getElementById("coachPanel");
       const coachClose = document.getElementById("coachClose");
+      const coachClear = document.getElementById("coachClear");
       const coachProgress = document.getElementById("coachProgress");
       const coachProgressText = document.getElementById("coachProgressText");
       const coachProgressFill = document.getElementById("coachProgressFill");
@@ -642,6 +657,7 @@
       const probeNote = document.getElementById("probeNote");
       const probeEnter = document.getElementById("probeEnter");
       const probeRetry = document.getElementById("probeRetry");
+      const probeClear = document.getElementById("probeClear");
       const flash = document.getElementById("flash");
       const controls = document.getElementById("controls");
       const zoomBar = document.getElementById("zoomBar");
@@ -1303,6 +1319,7 @@
         controls.classList.remove("show");
         probeEnter.hidden = true;
         probeRetry.hidden = true;
+        probeClear.hidden = true;
         probeList.hidden = true;
         probeNote.hidden = true;
         probeStatus.textContent = "正在检测设备与依赖…";
@@ -1390,8 +1407,124 @@
         probeStatus.textContent = "检测完成";
         probeEnter.hidden = false;
         probeRetry.hidden = false;
+        probeClear.hidden = false;
         probeEnter.disabled = !shootOk;
         probeEnter.textContent = shootOk ? "进入拍摄" : "环境不满足，无法拍摄";
+      }
+
+      async function clearBrowserCaches() {
+        const tasks = [];
+
+        try {
+          localStorage.removeItem("doyen_hf_host");
+        } catch (_) {}
+        try {
+          if (typeof window !== "undefined") {
+            delete window.__DOYEN_HF_HOST__;
+          }
+        } catch (_) {}
+
+        if (typeof caches !== "undefined" && caches.keys) {
+          tasks.push(
+            caches.keys().then(function (keys) {
+              return Promise.all(
+                keys.map(function (key) {
+                  return caches.delete(key);
+                })
+              );
+            })
+          );
+        }
+
+        if (typeof indexedDB !== "undefined") {
+          if (indexedDB.databases) {
+            tasks.push(
+              indexedDB.databases().then(function (dbs) {
+                return Promise.all(
+                  (dbs || []).map(function (db) {
+                    const name = db && db.name;
+                    if (!name) return Promise.resolve();
+                    return new Promise(function (resolve) {
+                      const req = indexedDB.deleteDatabase(name);
+                      req.onsuccess = function () {
+                        resolve();
+                      };
+                      req.onerror = function () {
+                        resolve();
+                      };
+                      req.onblocked = function () {
+                        resolve();
+                      };
+                    });
+                  })
+                );
+              })
+            );
+          } else {
+            // Safari 旧版无 databases()：清常见 transformers 库名
+            [
+              "transformers-cache",
+              "transformersjs-cache",
+              "@huggingface/transformers",
+            ].forEach(function (name) {
+              tasks.push(
+                new Promise(function (resolve) {
+                  const req = indexedDB.deleteDatabase(name);
+                  req.onsuccess = function () {
+                    resolve();
+                  };
+                  req.onerror = function () {
+                    resolve();
+                  };
+                  req.onblocked = function () {
+                    resolve();
+                  };
+                })
+              );
+            });
+          }
+        }
+
+        await Promise.all(tasks);
+      }
+
+      async function onClearCache() {
+        const ok = window.confirm(
+          "清除本站模型缓存与相关本地数据？下载中断或页面崩溃后建议清除后重试。完成后会刷新页面。"
+        );
+        if (!ok) return;
+
+        if (probeClear) probeClear.disabled = true;
+        if (probeRetry) probeRetry.disabled = true;
+        if (probeEnter) probeEnter.disabled = true;
+        if (coachClear) coachClear.disabled = true;
+        if (probeStatus) probeStatus.textContent = "正在清除缓存…";
+        if (probeNote) {
+          probeNote.hidden = false;
+          probeNote.textContent = "清除 Cache Storage / IndexedDB / 模型源偏好…";
+        }
+        showToast("正在清除缓存…");
+
+        try {
+          await clearBrowserCaches();
+          if (probeStatus) probeStatus.textContent = "缓存已清除，即将刷新…";
+          showToast("缓存已清除", "ok");
+          setTimeout(function () {
+            location.reload();
+          }, 400);
+        } catch (err) {
+          if (probeClear) probeClear.disabled = false;
+          if (probeRetry) probeRetry.disabled = false;
+          if (probeEnter) probeEnter.disabled = false;
+          if (coachClear) coachClear.disabled = false;
+          if (probeStatus) probeStatus.textContent = "清除失败";
+          if (probeNote) {
+            probeNote.textContent =
+              (err && err.message) ||
+              "清除缓存失败，请手动清理浏览器站点数据后重试。";
+          }
+          showToast("清除缓存失败", "err");
+        }
       }
 
       async function startCamera() {
@@ -1738,6 +1871,7 @@
 
       coachBtn.addEventListener("click", runCoach);
       coachClose.addEventListener("click", hideCoachPanel);
+      coachClear.addEventListener("click", onClearCache);
 
 
       gate.addEventListener("click", startCamera);
@@ -1748,6 +1882,7 @@
       probeRetry.addEventListener("click", function () {
         runDeviceProbe();
       });
+      probeClear.addEventListener("click", onClearCache);
       shutter.addEventListener("click", onShutter);
       flipBtn.addEventListener("click", flipCamera);
 
