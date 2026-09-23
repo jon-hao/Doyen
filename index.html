@@ -575,7 +575,6 @@
       async function setShootMode(mode, options) {
         options = options || {};
         if (!MODE_PRESETS[mode]) return;
-        const prev = shootMode;
         shootMode = mode;
         updateModeButtons();
         renderFocalButtons();
