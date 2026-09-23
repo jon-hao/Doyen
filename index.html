@@ -14,8 +14,6 @@
       color-scheme: dark;
       --safe-bottom: env(safe-area-inset-bottom, 0px);
       --safe-top: env(safe-area-inset-top, 0px);
-      --dof-blur: 0px;
-      --dof-amount: 0;
     }
 
     * {
@@ -76,99 +74,18 @@
       transition: none;
     }
 
-    #dofLayer {
-      position: absolute;
-      inset: 0;
-      width: 100%;
-      height: 100%;
-      pointer-events: none;
-      opacity: 0;
-    }
 
     #overlay {
       position: absolute;
       inset: 0;
       display: flex;
       flex-direction: column;
-      justify-content: space-between;
+      justify-content: flex-end;
       align-items: center;
-      padding: calc(10px + var(--safe-top)) 16px calc(28px + var(--safe-bottom));
+      padding: 20px 16px calc(28px + var(--safe-bottom));
       pointer-events: none;
     }
 
-    #topBar {
-      pointer-events: auto;
-      width: min(420px, 100%);
-      display: none;
-      align-items: center;
-      gap: 12px;
-      padding: 10px 14px;
-      border-radius: 18px;
-      background: rgba(0, 0, 0, 0.42);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
-    }
-
-    #topBar.show { display: flex; }
-
-    #apertureLabel {
-      min-width: 3.4em;
-      color: #f5d76e;
-      font-size: 15px;
-      font-weight: 700;
-      font-variant-numeric: tabular-nums;
-      letter-spacing: 0.02em;
-    }
-
-    #apertureSlider {
-      flex: 1;
-      -webkit-appearance: none;
-      appearance: none;
-      height: 28px;
-      margin: 0;
-      background: transparent;
-      outline: none;
-      touch-action: none;
-      cursor: pointer;
-    }
-
-    #apertureSlider::-webkit-slider-runnable-track {
-      height: 4px;
-      border-radius: 999px;
-      background: rgba(255, 255, 255, 0.28);
-    }
-
-    #apertureSlider::-webkit-slider-thumb {
-      -webkit-appearance: none;
-      appearance: none;
-      width: 26px;
-      height: 26px;
-      margin-top: -11px;
-      border-radius: 50%;
-      background: #fff;
-      border: 0;
-      box-shadow: 0 1px 6px rgba(0, 0, 0, 0.4);
-      transition: transform 0.08s ease-out;
-    }
-
-    #apertureSlider:active::-webkit-slider-thumb {
-      transform: scale(1.12);
-    }
-
-    #apertureSlider::-moz-range-track {
-      height: 4px;
-      border-radius: 999px;
-      background: rgba(255, 255, 255, 0.28);
-    }
-
-    #apertureSlider::-moz-range-thumb {
-      width: 26px;
-      height: 26px;
-      border-radius: 50%;
-      background: #fff;
-      border: 0;
-      box-shadow: 0 1px 6px rgba(0, 0, 0, 0.4);
-    }
 
     #toast {
       position: absolute;
@@ -405,24 +322,11 @@
   <div id="app">
     <div id="stage">
       <video id="preview" playsinline autoplay muted></video>
-      <canvas id="dofLayer"></canvas>
     </div>
     <canvas id="shot"></canvas>
     <div id="flash"></div>
 
     <div id="overlay">
-      <div id="topBar" class="show">
-        <span id="apertureLabel">f/2.8</span>
-        <input
-          id="apertureSlider"
-          type="range"
-          min="0"
-          max="1000"
-          step="1"
-          value="286"
-          aria-label="景深光圈"
-        />
-      </div>
       <div id="toast"></div>
       <div id="controls" class="show">
         <div id="focalRow">
@@ -467,7 +371,6 @@
   <script>
     (function () {
       const video = document.getElementById("preview");
-      const dofLayer = document.getElementById("dofLayer");
       const canvas = document.getElementById("shot");
       const shutter = document.getElementById("shutter");
       const flipBtn = document.getElementById("flipBtn");
@@ -476,16 +379,9 @@
       const secureHint = document.getElementById("secureHint");
       const flash = document.getElementById("flash");
       const controls = document.getElementById("controls");
-      const topBar = document.getElementById("topBar");
       const zoomBar = document.getElementById("zoomBar");
       const modeBar = document.getElementById("modeBar");
       const focalRow = document.getElementById("focalRow");
-      const apertureLabel = document.getElementById("apertureLabel");
-      const apertureSlider = document.getElementById("apertureSlider");
-
-      const F_MIN = 1.4;
-      const F_MAX = 16;
-      const SLIDER_MAX = 1000;
 
       // 以主摄 ≈24mm 为 1x，焦段换算成相对倍率
       const MODE_PRESETS = {
@@ -521,12 +417,8 @@
       let shootMode = "landscape";
       let zoomFactor = 1;
       let digitalScale = 1;
-      let apertureF = 2.8;
       let supportZoom = false;
       let supportLensSwitch = false;
-      let supportBackgroundBlur = false;
-      let dofRaf = 0;
-      let dofLooping = false;
       let hwZoom = { min: 1, max: 1 };
       /** @type {{deviceId:string,label:string,kind:string,base:number}[]} */
       let lenses = [];
@@ -718,7 +610,6 @@
         video.style.maxHeight = "none";
         video.style.objectFit = "fill";
         updatePreviewTransform();
-        ensureDofLoop();
       }
 
       function updatePreviewTransform() {
@@ -736,7 +627,6 @@
         requestAnimationFrame(function () {
           layoutVideos();
           requestAnimationFrame(layoutVideos);
-          ensureDofLoop();
         });
       }
 
@@ -756,157 +646,8 @@
         focalRow.classList.toggle("front-locked", facingMode === "user");
       }
 
-      function formatAperture(value) {
-        const n = Number(value);
-        // 显示一位小数，整数也写成 f/2.0 更稳；常用整档去尾零
-        if (Math.abs(n - Math.round(n)) < 0.05) return "f/" + Math.round(n);
-        return "f/" + n.toFixed(1);
-      }
-
-      function sliderToF(sliderValue) {
-        const t = clamp(Number(sliderValue) / SLIDER_MAX, 0, 1);
-        // 对数映射：滑动更符合光圈档位感知
-        return F_MIN * Math.pow(F_MAX / F_MIN, t);
-      }
-
-      function fToSlider(f) {
-        const t = Math.log(clamp(f, F_MIN, F_MAX) / F_MIN) / Math.log(F_MAX / F_MIN);
-        return Math.round(t * SLIDER_MAX);
-      }
-
-      function getDofStrength() {
-        // f/1.4 → 1（浅景深），f/16 → 0（深景深）
-        const t = Math.log(clamp(apertureF, F_MIN, F_MAX) / F_MIN) / Math.log(F_MAX / F_MIN);
-        return 1 - t;
-      }
-
-      async function applyHardwareDof(strength) {
-        if (!supportBackgroundBlur) return false;
-        const track = getTrack();
-        if (!track) return false;
-        const want = strength > 0.28;
-        const settings =
-          typeof track.getSettings === "function" ? track.getSettings() : {};
-        if (settings.backgroundBlur === want) return true;
-        try {
-          await track.applyConstraints({ backgroundBlur: want });
-          return true;
-        } catch (_) {
-          return false;
-        }
-      }
-
-      function drawVideoCover(ctx, dw, dh) {
-        const vw = video.videoWidth;
-        const vh = video.videoHeight;
-        if (!vw || !vh) return;
-        const mirror = facingMode === "user";
-        const dig = digitalScale > 1.01 ? digitalScale : 1;
-        const srcW = vw / dig;
-        const srcH = vh / dig;
-        const sx = (vw - srcW) / 2;
-        const sy = (vh - srcH) / 2;
-        const scale = Math.max(dw / srcW, dh / srcH);
-        const dw2 = srcW * scale;
-        const dh2 = srcH * scale;
-        const dx = (dw - dw2) / 2;
-        const dy = (dh - dh2) / 2;
-        ctx.save();
-        if (mirror) {
-          ctx.translate(dw, 0);
-          ctx.scale(-1, 1);
-        }
-        ctx.drawImage(video, sx, sy, srcW, srcH, dx, dy, dw2, dh2);
-        ctx.restore();
-      }
-
-      function paintDofFrame(strength) {
-        const stageEl = document.getElementById("stage");
-        const w = stageEl.clientWidth || window.innerWidth || 0;
-        const h = stageEl.clientHeight || window.innerHeight || 0;
-        if (!w || !h || !video.videoWidth) {
-          dofLayer.style.opacity = "0";
-          return;
-        }
-        if (dofLayer.width !== w || dofLayer.height !== h) {
-          dofLayer.width = w;
-          dofLayer.height = h;
-        }
-        const ctx = dofLayer.getContext("2d");
-        const blurPx = 6 + strength * 22;
-        ctx.clearRect(0, 0, w, h);
-        try {
-          ctx.filter = "blur(" + blurPx.toFixed(1) + "px)";
-        } catch (_) {}
-        drawVideoCover(ctx, w, h);
-        try {
-          ctx.filter = "none";
-        } catch (_) {}
-
-        // 中间挖空，露出下方清晰 video
-        ctx.globalCompositeOperation = "destination-out";
-        const r0 = Math.min(w, h) * (0.18 + (1 - strength) * 0.12);
-        const r1 = Math.min(w, h) * (0.48 + (1 - strength) * 0.18);
-        const grd = ctx.createRadialGradient(
-          w * 0.5,
-          h * 0.45,
-          r0,
-          w * 0.5,
-          h * 0.45,
-          r1
-        );
-        grd.addColorStop(0, "rgba(0,0,0,1)");
-        grd.addColorStop(0.55, "rgba(0,0,0,0.65)");
-        grd.addColorStop(1, "rgba(0,0,0,0)");
-        ctx.fillStyle = grd;
-        ctx.fillRect(0, 0, w, h);
-        ctx.globalCompositeOperation = "source-over";
-        dofLayer.style.opacity = String(0.45 + strength * 0.55);
-      }
-
-      function ensureDofLoop() {
-        if (dofLooping) return;
-        dofLooping = true;
-        function tick() {
-          const strength = getDofStrength();
-          if (!stream || document.hidden) {
-            dofLayer.style.opacity = "0";
-            dofLooping = false;
-            return;
-          }
-          if (strength < 0.04) {
-            dofLayer.style.opacity = "0";
-          } else {
-            paintDofFrame(strength);
-          }
-          requestAnimationFrame(tick);
-        }
-        requestAnimationFrame(tick);
-      }
-
-      function updateApertureUI(options) {
-        options = options || {};
-        apertureLabel.textContent = formatAperture(apertureF);
-        if (!options.keepSlider) {
-          apertureSlider.value = String(fToSlider(apertureF));
-        }
-        const strength = getDofStrength();
-        ensureDofLoop();
-        if (strength >= 0.04) paintDofFrame(strength);
-        else dofLayer.style.opacity = "0";
-        if (!options.skipHardware) {
-          applyHardwareDof(strength);
-        }
-      }
-
-      function setApertureFromSlider(sliderValue, options) {
-        apertureF = sliderToF(sliderValue);
-        updateApertureUI(Object.assign({ keepSlider: true }, options || {}));
-      }
-
       function onVideoGeometry() {
         layoutVideos();
-        ensureDofLoop();
       }
 
       video.addEventListener("loadedmetadata", onVideoGeometry);
@@ -948,7 +689,6 @@
           await video.play();
           layoutVideos();
           requestAnimationFrame(layoutVideos);
-          ensureDofLoop();
         } catch (err) {
           next.getTracks().forEach(function (t) { t.stop(); });
           stream = prev;
@@ -1128,18 +868,6 @@
         refreshHwZoom();
         const track = getTrack();
 
-        supportBackgroundBlur = false;
-        if (track && typeof track.getCapabilities === "function") {
-          const caps = track.getCapabilities() || {};
-          if (
-            Array.isArray(caps.backgroundBlur) &&
-            caps.backgroundBlur.indexOf(true) !== -1 &&
-            caps.backgroundBlur.indexOf(false) !== -1
-          ) {
-            supportBackgroundBlur = true;
-          }
-        }
-
         if (supportZoom && track) {
           try {
             const settings =
@@ -1187,8 +915,6 @@
 
           shutter.disabled = false;
           flipBtn.disabled = false;
-          topBar.classList.add("show");
-          updateApertureUI();
         } catch (err) {
           if (stream) {
             stream.getTracks().forEach(function (t) { t.stop(); });
@@ -1229,7 +955,20 @@
         }
       }
 
-      function drawVideoFrame(ctx, width, height) {
+      function captureFrame() {
+        const width = video.videoWidth;
+        const height = video.videoHeight;
+        if (!width || !height) throw new Error("画面还没就绪");
+
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+
+        if (facingMode === "user") {
+          ctx.translate(width, 0);
+          ctx.scale(-1, 1);
+        }
+
         if (digitalScale > 1.01) {
           const cropW = width / digitalScale;
           const cropH = height / digitalScale;
@@ -1239,69 +978,6 @@
         } else {
           ctx.drawImage(video, 0, 0, width, height);
         }
-      }
-
-      function captureFrame() {
-        const width = video.videoWidth;
-        const height = video.videoHeight;
-        if (!width || !height) throw new Error("画面还没就绪");
-
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext("2d");
-        const strength = getDofStrength();
-
-        ctx.save();
-        if (facingMode === "user") {
-          ctx.translate(width, 0);
-          ctx.scale(-1, 1);
-        }
-
-        if (strength < 0.05) {
-          drawVideoFrame(ctx, width, height);
-          ctx.restore();
-          return;
-        }
-
-        // 先画虚化层，再用径向蒙版叠清晰主体
-        const blurPx = Math.max(2, strength * Math.min(width, height) * 0.012);
-        ctx.filter = "blur(" + blurPx.toFixed(1) + "px)";
-        drawVideoFrame(ctx, width, height);
-        ctx.filter = "none";
-
-        const sharp = document.createElement("canvas");
-        sharp.width = width;
-        sharp.height = height;
-        const sctx = sharp.getContext("2d");
-        if (facingMode === "user") {
-          sctx.translate(width, 0);
-          sctx.scale(-1, 1);
-        }
-        drawVideoFrame(sctx, width, height);
-
-        const mask = document.createElement("canvas");
-        mask.width = width;
-        mask.height = height;
-        const mctx = mask.getContext("2d");
-        const grd = mctx.createRadialGradient(
-          width * 0.5,
-          height * 0.45,
-          Math.min(width, height) * 0.22,
-          width * 0.5,
-          height * 0.45,
-          Math.min(width, height) * 0.62
-        );
-        grd.addColorStop(0, "rgba(0,0,0,1)");
-        grd.addColorStop(0.55, "rgba(0,0,0," + (0.75 - strength * 0.15).toFixed(2) + ")");
-        grd.addColorStop(1, "rgba(0,0,0,0)");
-        mctx.fillStyle = grd;
-        mctx.fillRect(0, 0, width, height);
-        sctx.globalCompositeOperation = "destination-in";
-        sctx.setTransform(1, 0, 0, 1, 0, 0);
-        sctx.drawImage(mask, 0, 0);
-
-        ctx.drawImage(sharp, 0, 0);
-        ctx.restore();
       }
 
       function canvasToBlob() {
@@ -1373,31 +1049,6 @@
 
       updateModeButtons();
       renderFocalButtons();
-      updateApertureUI({ skipHardware: true });
-
-      function onApertureInput(ev) {
-        const value = Number((ev && ev.target ? ev.target : apertureSlider).value);
-        // 先立刻改文案，再在下一帧重绘虚化，保证手感跟手
-        apertureF = sliderToF(value);
-        apertureLabel.textContent = formatAperture(apertureF);
-        if (dofRaf) cancelAnimationFrame(dofRaf);
-        dofRaf = requestAnimationFrame(function () {
-          dofRaf = 0;
-          updateApertureUI({ keepSlider: true, skipHardware: true });
-        });
-      }
-
-      function onApertureCommit(ev) {
-        if (dofRaf) {
-          cancelAnimationFrame(dofRaf);
-          dofRaf = 0;
-        }
-        const value = Number((ev && ev.target ? ev.target : apertureSlider).value);
-        setApertureFromSlider(value);
-      }
-
-      apertureSlider.addEventListener("input", onApertureInput);
-      apertureSlider.addEventListener("change", onApertureCommit);
 
       document.addEventListener("visibilitychange", function () {
         if (!document.hidden) resumePreview();
