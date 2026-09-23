@@ -12,9 +12,104 @@ import {
 
 env.allowLocalModels = false;
 env.useBrowserCache = true;
-env.remoteHost = "https://hf-mirror.com";
 
 const MODEL_ID = "onnx-community/Florence-2-base-ft";
+const HOST_CANDIDATES = [
+  "https://huggingface.co",
+  "https://hf-mirror.com",
+];
+
+function applyRemoteHost(host) {
+  if (!host) return;
+  env.remoteHost = host.replace(/\/$/, "");
+}
+
+function resolvePreferredHost() {
+  try {
+    if (typeof window !== "undefined" && window.__DOYEN_HF_HOST__) {
+      return String(window.__DOYEN_HF_HOST__);
+    }
+    if (typeof localStorage !== "undefined") {
+      const saved = localStorage.getItem("doyen_hf_host");
+      if (saved) return saved;
+    }
+  } catch (_) {}
+  return HOST_CANDIDATES[0];
+}
+
+applyRemoteHost(resolvePreferredHost());
+
+export function getModelHosts() {
+  return HOST_CANDIDATES.slice();
+}
+
+export function setModelHost(host) {
+  applyRemoteHost(host);
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem("doyen_hf_host", env.remoteHost);
+    }
+    if (typeof window !== "undefined") {
+      window.__DOYEN_HF_HOST__ = env.remoteHost;
+    }
+  } catch (_) {}
+}
+
+export function getModelHost() {
+  return env.remoteHost;
+}
+
+/**
+ * 探测哪个模型源可从当前浏览器 CORS 访问
+ */
+export async function probeModelHosts(onProgress) {
+  const results = [];
+  for (let i = 0; i < HOST_CANDIDATES.length; i++) {
+    const host = HOST_CANDIDATES[i];
+    if (onProgress) {
+      onProgress({ status: "loading", data: "探测 " + host + "…" });
+    }
+    const ctrl =
+      typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timer = ctrl
+      ? setTimeout(function () {
+          ctrl.abort();
+        }, 10000)
+      : null;
+    try {
+      const url =
+        host.replace(/\/$/, "") +
+        "/" +
+        MODEL_ID +
+        "/resolve/main/config.json";
+      const res = await fetch(url, {
+        method: "GET",
+        mode: "cors",
+        cache: "no-store",
+        signal: ctrl ? ctrl.signal : undefined,
+      });
+      if (timer) clearTimeout(timer);
+      if (res.ok) {
+        results.push({ host: host, ok: true, detail: "可访问" });
+        setModelHost(host);
+        return { ok: true, host: host, results: results };
+      }
+      results.push({
+        host: host,
+        ok: false,
+        detail: "HTTP " + res.status,
+      });
+    } catch (err) {
+      if (timer) clearTimeout(timer);
+      const detail =
+        err && err.name === "AbortError"
+          ? "超时"
+          : (err && err.message) || "Failed to fetch";
+      results.push({ host: host, ok: false, detail: detail });
+    }
+  }
+  return { ok: false, host: null, results: results };
+}
 
 let processorPromise = null;
 let tokenizerPromise = null;
@@ -69,10 +164,23 @@ async function loadModelOnDevice(device, onProgress) {
 export async function loadCoach(onProgress) {
   if (modelPromise && warmed) {
     notify(onProgress, { status: "ready" });
-    return { device: deviceUsed };
+    return { device: deviceUsed, host: env.remoteHost };
   }
 
   try {
+    // 加载前再确认可用模型源
+    notify(onProgress, { status: "loading", data: "选择可用模型源…" });
+    const hostProbe = await probeModelHosts(onProgress);
+    if (!hostProbe.ok) {
+      throw new Error(
+        "无法访问模型源（huggingface.co / hf-mirror.com 均失败）。请换网络或开代理后重试。"
+      );
+    }
+    notify(onProgress, {
+      status: "loading",
+      data: "使用模型源 " + hostProbe.host,
+    });
+
     notify(onProgress, { status: "loading", data: "下载处理器…" });
     processorPromise =
       processorPromise ||
@@ -134,7 +242,7 @@ export async function loadCoach(onProgress) {
     }
 
     notify(onProgress, { status: "ready", device: deviceUsed });
-    return { device: deviceUsed };
+    return { device: deviceUsed, host: env.remoteHost };
   } catch (err) {
     processorPromise = null;
     tokenizerPromise = null;
@@ -142,10 +250,7 @@ export async function loadCoach(onProgress) {
     warmed = false;
     deviceUsed = null;
     const msg = (err && err.message) || "模型加载失败";
-    throw new Error(
-      msg +
-        "。若在 iPhone 上，请用桌面 Chrome 重试；或检查网络能否访问 hf-mirror.com。"
-    );
+    throw new Error(msg);
   }
 }
 

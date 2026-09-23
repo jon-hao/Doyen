@@ -389,6 +389,19 @@
 
     #probeEnter[hidden] { display: none; }
 
+    #probeRetry {
+      margin-top: 0;
+      border: 0;
+      border-radius: 12px;
+      padding: 10px 18px;
+      font-size: 14px;
+      font-weight: 600;
+      color: #fff;
+      background: rgba(255, 255, 255, 0.16);
+    }
+
+    #probeRetry[hidden] { display: none; }
+
 
     #flash {
       position: absolute;
@@ -602,6 +615,7 @@
       <ul id="probeList" hidden></ul>
       <p id="probeNote" hidden></p>
       <button id="probeEnter" type="button" hidden>进入拍摄</button>
+      <button id="probeRetry" type="button" hidden>重新检测</button>
     </div>
   </div>
 
@@ -627,6 +641,7 @@
       const probeList = document.getElementById("probeList");
       const probeNote = document.getElementById("probeNote");
       const probeEnter = document.getElementById("probeEnter");
+      const probeRetry = document.getElementById("probeRetry");
       const flash = document.getElementById("flash");
       const controls = document.getElementById("controls");
       const zoomBar = document.getElementById("zoomBar");
@@ -1189,37 +1204,32 @@
         }
       }
 
-      async function checkHfMirror() {
-        const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
-        const timer = ctrl
-          ? setTimeout(function () {
-              ctrl.abort();
-            }, 8000)
-          : null;
+      async function checkModelHosts() {
         try {
-          const res = await fetch(
-            "https://hf-mirror.com/onnx-community/Florence-2-base-ft/resolve/main/config.json",
-            {
-              method: "GET",
-              mode: "cors",
-              cache: "no-store",
-              signal: ctrl ? ctrl.signal : undefined,
-            }
-          );
-          if (timer) clearTimeout(timer);
-          if (!res.ok) {
-            return { ok: false, detail: "HTTP " + res.status };
+          const engine = await import(coachAssetUrl("coach-engine.js"));
+          const probed = await engine.probeModelHosts();
+          if (probed.ok) {
+            return {
+              ok: true,
+              detail: probed.host.replace(/^https?:\/\//, ""),
+              host: probed.host,
+            };
           }
-          return { ok: true, detail: "可访问" };
-        } catch (err) {
-          if (timer) clearTimeout(timer);
-          const name = err && err.name;
-          if (name === "AbortError") {
-            return { ok: false, detail: "超时" };
-          }
+          const parts = (probed.results || []).map(function (r) {
+            return (
+              String(r.host).replace(/^https?:\/\//, "") + ":" + r.detail
+            );
+          });
           return {
             ok: false,
-            detail: (err && err.message) || "不可达",
+            detail: parts.length ? parts.join("；") : "均失败",
+            host: null,
+          };
+        } catch (err) {
+          return {
+            ok: false,
+            detail: (err && err.message) || "检测失败",
+            host: null,
           };
         }
       }
@@ -1229,6 +1239,7 @@
         gate.classList.remove("show");
         controls.classList.remove("show");
         probeEnter.hidden = true;
+        probeRetry.hidden = true;
         probeList.hidden = true;
         probeNote.hidden = true;
         probeStatus.textContent = "正在检测设备与依赖…";
@@ -1244,18 +1255,18 @@
         probeStatus.textContent = "检测 Transformers.js CDN…";
         const tf = await checkTransformersCdn();
 
-        probeStatus.textContent = "检测模型镜像 hf-mirror…";
-        const mirror = await checkHfMirror();
+        probeStatus.textContent = "检测模型源（Hugging Face / hf-mirror）…";
+        const mirror = await checkModelHosts();
 
-        // 辅助拍摄：CDN + 镜像必须过；WebGPU 没有也可试 WASM（标 warn）
+        // 辅助拍摄：CDN + 任一模型源
         const assistOk = tf.ok && mirror.ok;
         const assistDetail = !tf.ok
           ? "引擎不可用：" + tf.detail
           : !mirror.ok
             ? "模型源不可用：" + mirror.detail
             : gpu.ok
-              ? "可用（WebGPU）"
-              : "可用（将走 WASM，较慢）";
+              ? "可用（WebGPU · " + mirror.detail + "）"
+              : "可用（WASM · " + mirror.detail + "）";
 
         deviceReport = {
           https: httpsOk,
@@ -1263,6 +1274,7 @@
           webgpu: gpu.ok,
           transformers: tf.ok,
           hfMirror: mirror.ok,
+          modelHost: mirror.host || "",
           assistOk: assistOk,
           detail: assistDetail,
         };
@@ -1275,18 +1287,10 @@
             cameraApi ? "ok" : "no",
             cameraApi ? "getUserMedia" : "不支持"
           ) +
+          probeRow("WebGPU", gpu.ok ? "ok" : "warn", gpu.detail) +
+          probeRow("Transformers.js", tf.ok ? "ok" : "no", tf.detail) +
           probeRow(
-            "WebGPU",
-            gpu.ok ? "ok" : "warn",
-            gpu.detail
-          ) +
-          probeRow(
-            "Transformers.js",
-            tf.ok ? "ok" : "no",
-            tf.detail
-          ) +
-          probeRow(
-            "hf-mirror 模型源",
+            "模型源",
             mirror.ok ? "ok" : "no",
             mirror.detail
           ) +
@@ -1299,10 +1303,10 @@
         probeNote.hidden = false;
         if (!assistOk) {
           probeNote.textContent =
-            "当前环境无法使用「辅助拍摄」。拍照功能仍可进入；建议用桌面 Chrome 打开本页再测辅助拍摄。";
+            "当前环境无法使用「辅助拍摄」。拍照仍可进入。可点「重新检测」，或换网络 / 桌面 Chrome 后再试。";
         } else if (!gpu.ok) {
           probeNote.textContent =
-            "无 WebGPU，辅助拍摄将尝试 WASM（首次下载大、偏慢）。建议桌面 Chrome 以获得更好体验。";
+            "无 WebGPU，辅助拍摄将尝试 WASM（首次下载大、偏慢）。建议桌面 Chrome。";
         } else {
           probeNote.textContent =
             "环境正常。进入拍摄后点「辅助拍摄」会首次下载视觉模型（约数百 MB）。";
@@ -1310,6 +1314,7 @@
 
         probeStatus.textContent = "检测完成";
         probeEnter.hidden = false;
+        probeRetry.hidden = false;
         probeEnter.disabled = !(httpsOk && cameraApi);
         if (!httpsOk || !cameraApi) {
           probeEnter.textContent = "环境不满足，无法拍摄";
@@ -1669,6 +1674,9 @@
       probeEnter.addEventListener("click", function () {
         if (probeEnter.disabled) return;
         startCamera();
+      });
+      probeRetry.addEventListener("click", function () {
+        runDeviceProbe();
       });
       shutter.addEventListener("click", onShutter);
       flipBtn.addEventListener("click", flipCamera);
