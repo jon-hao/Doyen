@@ -49,7 +49,7 @@
       transition: transform 0.12s ease-out;
     }
 
-    #preview.pinching {
+    #preview.dragging {
       transition: none;
     }
 
@@ -60,13 +60,13 @@
       flex-direction: column;
       justify-content: flex-end;
       align-items: center;
-      padding: 24px 20px calc(28px + var(--safe-bottom));
+      padding: 16px 16px calc(24px + var(--safe-bottom));
       pointer-events: none;
     }
 
     #toast {
       min-height: 24px;
-      margin-bottom: 14px;
+      margin-bottom: 10px;
       padding: 8px 14px;
       border-radius: 999px;
       background: rgba(0, 0, 0, 0.55);
@@ -79,25 +79,53 @@
       max-width: 90%;
     }
 
-    #toast.show {
-      opacity: 1;
+    #toast.show { opacity: 1; }
+    #toast.ok { background: rgba(22, 163, 74, 0.85); }
+    #toast.err { background: rgba(220, 38, 38, 0.85); }
+
+    #zoomStack {
+      pointer-events: auto;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 18px;
+      width: min(420px, 100%);
     }
 
-    #toast.ok {
-      background: rgba(22, 163, 74, 0.85);
+    #zoomStack.show { display: flex; }
+
+    #dialWrap {
+      position: relative;
+      width: min(320px, 86vw);
+      height: 118px;
+      touch-action: none;
     }
 
-    #toast.err {
-      background: rgba(220, 38, 38, 0.85);
+    #dialCanvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    #zoomReadout {
+      position: absolute;
+      left: 50%;
+      bottom: 8px;
+      transform: translateX(-50%);
+      color: #f5d76e;
+      font-size: 15px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      text-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+      pointer-events: none;
     }
 
     #zoomBar {
-      pointer-events: auto;
-      display: none;
+      display: flex;
       align-items: center;
       justify-content: center;
-      gap: 10px;
-      margin-bottom: 22px;
+      gap: 8px;
       padding: 6px 8px;
       border-radius: 999px;
       background: rgba(0, 0, 0, 0.38);
@@ -105,13 +133,9 @@
       -webkit-backdrop-filter: blur(12px);
     }
 
-    #zoomBar.show {
-      display: flex;
-    }
-
     .zoom-btn {
-      min-width: 42px;
-      height: 42px;
+      min-width: 44px;
+      height: 44px;
       padding: 0 8px;
       border: 0;
       border-radius: 50%;
@@ -126,6 +150,12 @@
       background: rgba(255, 255, 255, 0.2);
       color: #f5d76e;
       font-size: 14px;
+    }
+
+    #lensHint {
+      font-size: 11px;
+      color: rgba(255, 255, 255, 0.55);
+      min-height: 14px;
     }
 
     #shutter {
@@ -153,9 +183,7 @@
       opacity: 0.75;
     }
 
-    #shutter:disabled {
-      opacity: 0.35;
-    }
+    #shutter:disabled { opacity: 0.35; }
 
     #gate {
       position: absolute;
@@ -173,15 +201,12 @@
       touch-action: manipulation;
     }
 
-    #gate.show {
-      display: flex;
-    }
+    #gate.show { display: flex; }
 
     #gate h1 {
       margin: 0;
       font-size: 28px;
       font-weight: 600;
-      letter-spacing: 0.02em;
     }
 
     #gate p {
@@ -194,7 +219,6 @@
 
     #secureHint {
       display: none;
-      margin-top: 4px;
       font-size: 13px;
       color: #fbbf24;
     }
@@ -208,13 +232,9 @@
       transition: opacity 0.08s ease;
     }
 
-    #flash.show {
-      opacity: 0.85;
-    }
+    #flash.show { opacity: 0.85; }
 
-    canvas {
-      display: none;
-    }
+    canvas#shot { display: none; }
   </style>
 </head>
 <body>
@@ -225,7 +245,14 @@
 
     <div id="overlay">
       <div id="toast"></div>
-      <div id="zoomBar" aria-label="变焦"></div>
+      <div id="zoomStack">
+        <div id="dialWrap">
+          <canvas id="dialCanvas" width="640" height="236"></canvas>
+          <div id="zoomReadout">1x</div>
+        </div>
+        <div id="zoomBar" aria-label="焦距快捷切换"></div>
+        <div id="lensHint"></div>
+      </div>
       <button id="shutter" type="button" aria-label="拍照" disabled></button>
     </div>
 
@@ -245,25 +272,48 @@
       const gate = document.getElementById("gate");
       const secureHint = document.getElementById("secureHint");
       const flash = document.getElementById("flash");
+      const zoomStack = document.getElementById("zoomStack");
       const zoomBar = document.getElementById("zoomBar");
-      const app = document.getElementById("app");
+      const lensHint = document.getElementById("lensHint");
+      const dialCanvas = document.getElementById("dialCanvas");
+      const dialWrap = document.getElementById("dialWrap");
+      const zoomReadout = document.getElementById("zoomReadout");
+      const dialCtx = dialCanvas.getContext("2d");
 
       let stream = null;
       let starting = false;
       let capturing = false;
+      let switchingLens = false;
       let toastTimer = null;
+
+      /** @type {{deviceId:string,label:string,kind:'ultrawide'|'wide'|'tele',base:number}[]} */
+      let lenses = [];
+      let currentLens = null;
 
       const zoom = {
         value: 1,
-        min: 1,
+        min: 0.5,
         max: 5,
         hardware: false,
-        presets: [1, 2],
+        hwMin: 1,
+        hwMax: 1,
+        digital: 1,
+        presets: [0.5, 1, 2],
       };
 
+      let dialDragging = false;
       let pinchActive = false;
       let pinchStartDistance = 0;
       let pinchStartZoom = 1;
+      let switchToken = 0;
+
+      // 镜头切换滞回，避免转盘在边界抖切
+      const HYST = {
+        toUltra: 0.85,
+        leaveUltra: 1.05,
+        toTele: 1.95,
+        leaveTele: 1.75,
+      };
 
       function isSecureEnough() {
         return (
@@ -281,9 +331,7 @@
         );
       }
 
-      if (!isSecureEnough()) {
-        secureHint.style.display = "block";
-      }
+      if (!isSecureEnough()) secureHint.style.display = "block";
 
       function showToast(message, type) {
         toast.textContent = message;
@@ -301,82 +349,276 @@
         }, 90);
       }
 
-      function getTrack() {
-        return stream ? stream.getVideoTracks()[0] : null;
-      }
-
       function clamp(n, min, max) {
         return Math.min(max, Math.max(min, n));
       }
 
       function formatZoomLabel(value) {
-        if (Math.abs(value - 0.5) < 0.05) return ".5";
+        if (Math.abs(value - 0.5) < 0.04) return ".5";
         const rounded = Math.round(value * 10) / 10;
-        if (Number.isInteger(rounded)) return String(rounded);
+        if (Math.abs(rounded - Math.round(rounded)) < 0.05) {
+          return String(Math.round(rounded));
+        }
         return rounded.toFixed(1);
       }
 
-      function buildPresets(min, max) {
+      function getTrack() {
+        return stream ? stream.getVideoTracks()[0] : null;
+      }
+
+      function isFrontLabel(label) {
+        const l = (label || "").toLowerCase();
+        return (
+          l.includes("front") ||
+          l.includes("user") ||
+          l.includes("facetime") ||
+          l.includes("前")
+        );
+      }
+
+      function classifyDevice(device) {
+        const l = (device.label || "").toLowerCase();
+        if (
+          l.includes("ultra") ||
+          l.includes("超广") ||
+          l.includes("0.5")
+        ) {
+          return { kind: "ultrawide", base: 0.5 };
+        }
+        if (
+          l.includes("tele") ||
+          l.includes("长焦") ||
+          l.includes("5x") ||
+          l.includes("3x")
+        ) {
+          const base = l.includes("5") ? 5 : l.includes("3") ? 3 : 2;
+          return { kind: "tele", base: base };
+        }
+        return { kind: "wide", base: 1 };
+      }
+
+      async function discoverLenses() {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videos = devices.filter(function (d) {
+          return d.kind === "videoinput" && d.deviceId && !isFrontLabel(d.label);
+        });
+
+        const found = [];
+        const usedKinds = {};
+
+        videos.forEach(function (device) {
+          const info = classifyDevice(device);
+          // 每类镜头优先保留一个
+          if (usedKinds[info.kind]) return;
+          usedKinds[info.kind] = true;
+          found.push({
+            deviceId: device.deviceId,
+            label: device.label || info.kind,
+            kind: info.kind,
+            base: info.base,
+          });
+        });
+
+        // 若完全分不出多镜头，至少保留当前轨
+        if (!found.length && stream) {
+          const track = getTrack();
+          const settings = track && track.getSettings ? track.getSettings() : {};
+          found.push({
+            deviceId: settings.deviceId || "",
+            label: track ? track.label : "camera",
+            kind: "wide",
+            base: 1,
+          });
+        }
+
+        lenses = found.sort(function (a, b) {
+          return a.base - b.base;
+        });
+
+        // 无级范围：有超广则从 0.5，否则从 1；上限看长焦/数字
+        zoom.min = lenses.some(function (l) {
+          return l.kind === "ultrawide";
+        })
+          ? 0.5
+          : 1;
+
+        const tele = lenses.find(function (l) {
+          return l.kind === "tele";
+        });
+        zoom.max = tele ? Math.max(5, tele.base * 2) : 5;
+
+        zoom.presets = buildPresets(zoom.min, zoom.max, lenses);
+      }
+
+      function buildPresets(min, max, lensList) {
         const presets = [];
-        if (min <= 0.55) presets.push(0.5);
+        if (min <= 0.55 || lensList.some(function (l) { return l.kind === "ultrawide"; })) {
+          presets.push(0.5);
+        }
         presets.push(1);
-        if (max >= 1.8) presets.push(2);
-        if (max >= 2.8) presets.push(3);
-        if (max >= 4.5) presets.push(5);
+        if (max >= 1.8 || lensList.some(function (l) { return l.kind === "tele" && l.base <= 2; })) {
+          presets.push(2);
+        }
+        if (max >= 2.8 || lensList.some(function (l) { return l.kind === "tele" && l.base >= 3; })) {
+          presets.push(3);
+        }
+        if (max >= 4.5 || lensList.some(function (l) { return l.kind === "tele" && l.base >= 5; })) {
+          presets.push(5);
+        }
         return presets;
       }
 
-      function refreshZoomCapabilities() {
-        const track = getTrack();
-        let min = 1;
-        let max = 5;
-        let hardware = false;
+      function pickLensForZoom(logicalZoom, current) {
+        const ultra = lenses.find(function (l) { return l.kind === "ultrawide"; });
+        const wide = lenses.find(function (l) { return l.kind === "wide"; }) || lenses[0];
+        const tele = lenses.find(function (l) { return l.kind === "tele"; });
 
+        let kind = (current && current.kind) || "wide";
+
+        if (kind === "ultrawide") {
+          if (logicalZoom >= HYST.leaveUltra) kind = "wide";
+        } else if (kind === "tele") {
+          if (logicalZoom <= HYST.leaveTele) kind = "wide";
+        } else {
+          if (ultra && logicalZoom <= HYST.toUltra) kind = "ultrawide";
+          else if (tele && logicalZoom >= HYST.toTele) kind = "tele";
+          else kind = "wide";
+        }
+
+        if (kind === "ultrawide" && ultra) return ultra;
+        if (kind === "tele" && tele) return tele;
+        return wide || lenses[0] || null;
+      }
+
+      function lensCaption(lens) {
+        if (!lens) return "";
+        if (lens.kind === "ultrawide") return "超广角镜头";
+        if (lens.kind === "tele") return "长焦镜头";
+        if (lenses.length > 1) return "主摄";
+        return zoom.hardware ? "系统变焦" : "数字变焦";
+      }
+
+      function refreshTrackZoomCaps() {
+        const track = getTrack();
+        zoom.hardware = false;
+        zoom.hwMin = 1;
+        zoom.hwMax = 1;
         if (track && typeof track.getCapabilities === "function") {
           const caps = track.getCapabilities();
           if (caps && caps.zoom) {
-            hardware = true;
-            min = caps.zoom.min;
-            max = caps.zoom.max;
-            const settings =
-              typeof track.getSettings === "function" ? track.getSettings() : {};
-            if (typeof settings.zoom === "number") {
-              zoom.value = settings.zoom;
-            }
+            zoom.hardware = true;
+            zoom.hwMin = caps.zoom.min;
+            zoom.hwMax = caps.zoom.max;
+          }
+        }
+      }
+
+      async function openStream(constraints) {
+        return navigator.mediaDevices.getUserMedia(constraints);
+      }
+
+      async function switchToLens(lens) {
+        if (!lens) return;
+        if (currentLens && currentLens.deviceId === lens.deviceId) {
+          currentLens = lens;
+          return;
+        }
+
+        const token = ++switchToken;
+        switchingLens = true;
+
+        try {
+          const constraints = {
+            audio: false,
+            video: lens.deviceId
+              ? {
+                  deviceId: { exact: lens.deviceId },
+                  width: { ideal: 1920 },
+                  height: { ideal: 1080 },
+                }
+              : {
+                  facingMode: { ideal: "environment" },
+                  width: { ideal: 1920 },
+                  height: { ideal: 1080 },
+                },
+          };
+
+          let nextStream;
+          try {
+            nextStream = await openStream(constraints);
+          } catch (_) {
+            nextStream = await openStream({
+              audio: false,
+              video: { facingMode: { ideal: "environment" } },
+            });
+          }
+
+          if (token !== switchToken) {
+            nextStream.getTracks().forEach(function (t) { t.stop(); });
+            return;
+          }
+
+          const prev = stream;
+          stream = nextStream;
+          video.srcObject = stream;
+          await video.play();
+          if (prev) prev.getTracks().forEach(function (t) { t.stop(); });
+
+          currentLens = lens;
+          refreshTrackZoomCaps();
+        } finally {
+          if (token === switchToken) switchingLens = false;
+        }
+      }
+
+      function logicalToHardwareZoom(logicalZoom, lens) {
+        const base = (lens && lens.base) || 1;
+        // 把逻辑倍率映射到当前镜头的 zoom 约束
+        const relative = logicalZoom / base;
+        if (!zoom.hardware) return relative;
+        return clamp(relative, zoom.hwMin, zoom.hwMax);
+      }
+
+      async function applyLogicalZoom(logicalZoom, options) {
+        options = options || {};
+        const animate = !!options.animate;
+        zoom.value = clamp(logicalZoom, zoom.min, zoom.max);
+
+        const target = pickLensForZoom(zoom.value, currentLens);
+        if (target && (!currentLens || target.deviceId !== currentLens.deviceId)) {
+          try {
+            await switchToLens(target);
+          } catch (err) {
+            // 切镜头失败则继续在当前镜头上变焦
           }
         }
 
-        // 没有硬件 zoom 时，用画面数字变焦（网页常见回退）
-        if (!hardware) {
-          min = 1;
-          max = 5;
+        const track = getTrack();
+        const hwZoom = logicalToHardwareZoom(zoom.value, currentLens);
+
+        if (zoom.hardware && track) {
+          zoom.digital = 1;
+          video.classList.toggle("dragging", !animate);
+          video.style.transform = "none";
+          try {
+            await track.applyConstraints({ advanced: [{ zoom: hwZoom }] });
+          } catch (_) {
+            // 硬件失败 → 数字
+            zoom.hardware = false;
+            zoom.digital = Math.max(1, hwZoom);
+            video.style.transform = "scale(" + zoom.digital + ")";
+          }
+        } else {
+          // 无多镜头时，镜头切换已改变视角；镜头内再用数字变焦
+          const base = (currentLens && currentLens.base) || 1;
+          zoom.digital = Math.max(1, zoom.value / base);
+          video.classList.toggle("dragging", !animate);
+          video.style.transform =
+            zoom.digital > 1.001 ? "scale(" + zoom.digital + ")" : "none";
         }
 
-        zoom.min = min;
-        zoom.max = max;
-        zoom.hardware = hardware;
-        zoom.presets = buildPresets(min, max);
-        zoom.value = clamp(zoom.value, min, max);
-        renderZoomBar();
-        applyZoom(zoom.value, false);
-      }
-
-      function renderZoomBar() {
-        zoomBar.innerHTML = "";
-        zoom.presets.forEach(function (preset) {
-          const btn = document.createElement("button");
-          btn.type = "button";
-          btn.className = "zoom-btn";
-          btn.dataset.zoom = String(preset);
-          btn.textContent = formatZoomLabel(preset) + "x";
-          btn.addEventListener("click", function (event) {
-            event.stopPropagation();
-            applyZoom(preset, true);
-          });
-          zoomBar.appendChild(btn);
-        });
-        zoomBar.classList.add("show");
-        updateZoomButtons();
+        updateZoomUI();
+        drawDial();
       }
 
       function nearestPreset(value) {
@@ -392,12 +634,29 @@
         return best;
       }
 
-      function updateZoomButtons() {
+      function renderZoomButtons() {
+        zoomBar.innerHTML = "";
+        zoom.presets.forEach(function (preset) {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "zoom-btn";
+          btn.dataset.zoom = String(preset);
+          btn.textContent = formatZoomLabel(preset) + "x";
+          btn.addEventListener("click", function (event) {
+            event.stopPropagation();
+            applyLogicalZoom(preset, { animate: true });
+          });
+          zoomBar.appendChild(btn);
+        });
+        updateZoomUI();
+      }
+
+      function updateZoomUI() {
+        zoomReadout.textContent = formatZoomLabel(zoom.value) + "x";
+        lensHint.textContent = lensCaption(currentLens);
+
         const activePreset = nearestPreset(zoom.value);
-        const showExact =
-          Math.abs(zoom.value - activePreset) > 0.08 ||
-          pinchActive ||
-          Math.abs(zoom.value - Math.round(zoom.value)) > 0.05;
+        const showExact = Math.abs(zoom.value - activePreset) > 0.06;
 
         Array.prototype.forEach.call(
           zoomBar.querySelectorAll(".zoom-btn"),
@@ -405,37 +664,138 @@
             const preset = Number(btn.dataset.zoom);
             const isActive = Math.abs(preset - activePreset) < 0.01;
             btn.classList.toggle("active", isActive);
-            if (isActive && showExact) {
-              btn.textContent = formatZoomLabel(zoom.value) + "x";
-            } else {
-              btn.textContent = formatZoomLabel(preset) + "x";
-            }
+            btn.textContent =
+              isActive && showExact
+                ? formatZoomLabel(zoom.value) + "x"
+                : formatZoomLabel(preset) + "x";
           }
         );
       }
 
-      function applyZoom(value, animate) {
-        zoom.value = clamp(value, zoom.min, zoom.max);
-        const track = getTrack();
+      // -------- 转盘（对数刻度，类似系统相机手感） --------
+      function zoomToT(z) {
+        return Math.log(z / zoom.min) / Math.log(zoom.max / zoom.min);
+      }
 
-        if (zoom.hardware && track) {
-          video.classList.toggle("pinching", !animate);
-          video.style.transform = "none";
-          track
-            .applyConstraints({ advanced: [{ zoom: zoom.value }] })
-            .catch(function () {
-              // 部分机型会失败，回退数字变焦
-              zoom.hardware = false;
-              zoom.min = 1;
-              zoom.max = Math.max(zoom.max, 5);
-              video.style.transform = "scale(" + zoom.value + ")";
-            });
-        } else {
-          video.classList.toggle("pinching", !animate);
-          video.style.transform = "scale(" + zoom.value + ")";
+      function tToZoom(t) {
+        return zoom.min * Math.pow(zoom.max / zoom.min, clamp(t, 0, 1));
+      }
+
+      function drawDial() {
+        const w = dialCanvas.width;
+        const h = dialCanvas.height;
+        const ctx = dialCtx;
+        ctx.clearRect(0, 0, w, h);
+
+        const cx = w / 2;
+        const cy = h * 0.12;
+        const radius = Math.min(w, h * 2.2) * 0.42;
+        const start = Math.PI * 0.12;
+        const end = Math.PI - Math.PI * 0.12;
+
+        ctx.lineWidth = 10;
+        ctx.strokeStyle = "rgba(255,255,255,0.18)";
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius, start, end);
+        ctx.stroke();
+
+        // ticks
+        for (let i = 0; i <= 40; i++) {
+          const t = i / 40;
+          const ang = start + (end - start) * t;
+          const major = i % 5 === 0;
+          const r1 = radius - (major ? 18 : 10);
+          const r2 = radius + (major ? 6 : 2);
+          const x1 = cx + Math.cos(ang) * r1;
+          const y1 = cy + Math.sin(ang) * r1;
+          const x2 = cx + Math.cos(ang) * r2;
+          const y2 = cy + Math.sin(ang) * r2;
+          ctx.beginPath();
+          ctx.moveTo(x1, y1);
+          ctx.lineTo(x2, y2);
+          ctx.lineWidth = major ? 3 : 2;
+          ctx.strokeStyle = major
+            ? "rgba(255,255,255,0.55)"
+            : "rgba(255,255,255,0.28)";
+          ctx.stroke();
         }
 
-        updateZoomButtons();
+        // preset marks
+        zoom.presets.forEach(function (preset) {
+          const t = zoomToT(preset);
+          const ang = start + (end - start) * t;
+          const x = cx + Math.cos(ang) * (radius + 16);
+          const y = cy + Math.sin(ang) * (radius + 16);
+          ctx.fillStyle = "rgba(255,255,255,0.7)";
+          ctx.font = "22px -apple-system, sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(formatZoomLabel(preset), x, y);
+        });
+
+        // needle
+        const t = zoomToT(zoom.value);
+        const ang = start + (end - start) * t;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(cx + Math.cos(ang) * (radius - 4), cy + Math.sin(ang) * (radius - 4));
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = "#f5d76e";
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(
+          cx + Math.cos(ang) * radius,
+          cy + Math.sin(ang) * radius,
+          10,
+          0,
+          Math.PI * 2
+        );
+        ctx.fillStyle = "#f5d76e";
+        ctx.fill();
+      }
+
+      function eventToZoom(clientX, clientY) {
+        const rect = dialCanvas.getBoundingClientRect();
+        const scaleX = dialCanvas.width / rect.width;
+        const scaleY = dialCanvas.height / rect.height;
+        const x = (clientX - rect.left) * scaleX;
+        const y = (clientY - rect.top) * scaleY;
+        const cx = dialCanvas.width / 2;
+        const cy = dialCanvas.height * 0.12;
+        let ang = Math.atan2(y - cy, x - cx); // 0 at +x, clockwise? atan2
+        const start = Math.PI * 0.12;
+        const end = Math.PI - Math.PI * 0.12;
+        // Our arc is the bottom-ish semicircle from start to end (both in 0..PI)
+        ang = clamp(ang, start, end);
+        const t = (ang - start) / (end - start);
+        return tToZoom(t);
+      }
+
+      function onDialPointerDown(event) {
+        if (!stream) return;
+        dialDragging = true;
+        dialWrap.setPointerCapture(event.pointerId);
+        applyLogicalZoom(eventToZoom(event.clientX, event.clientY), {
+          animate: false,
+        });
+      }
+
+      function onDialPointerMove(event) {
+        if (!dialDragging) return;
+        applyLogicalZoom(eventToZoom(event.clientX, event.clientY), {
+          animate: false,
+        });
+      }
+
+      function onDialPointerUp(event) {
+        if (!dialDragging) return;
+        dialDragging = false;
+        try {
+          dialWrap.releasePointerCapture(event.pointerId);
+        } catch (_) {}
+        video.classList.remove("dragging");
+        updateZoomUI();
       }
 
       function touchDistance(touches) {
@@ -449,7 +809,7 @@
           pinchActive = true;
           pinchStartDistance = touchDistance(event.touches);
           pinchStartZoom = zoom.value;
-          video.classList.add("pinching");
+          video.classList.add("dragging");
         }
       }
 
@@ -458,15 +818,16 @@
         event.preventDefault();
         const distance = touchDistance(event.touches);
         if (pinchStartDistance <= 0) return;
-        const next = pinchStartZoom * (distance / pinchStartDistance);
-        applyZoom(next, false);
+        applyLogicalZoom(pinchStartZoom * (distance / pinchStartDistance), {
+          animate: false,
+        });
       }
 
       function onTouchEnd(event) {
         if (event.touches.length < 2) {
           pinchActive = false;
-          video.classList.remove("pinching");
-          updateZoomButtons();
+          video.classList.remove("dragging");
+          updateZoomUI();
         }
       }
 
@@ -483,29 +844,44 @@
             throw new Error("需要 HTTPS 才能使用相机");
           }
 
-          const constraints = {
-            audio: false,
-            video: {
-              facingMode: { ideal: "environment" },
-              width: { ideal: 1920 },
-              height: { ideal: 1080 },
-            },
-          };
-
           try {
-            stream = await navigator.mediaDevices.getUserMedia(constraints);
-          } catch (err) {
-            stream = await navigator.mediaDevices.getUserMedia({
+            stream = await openStream({
               audio: false,
-              video: true,
+              video: {
+                facingMode: { ideal: "environment" },
+                width: { ideal: 1920 },
+                height: { ideal: 1080 },
+              },
             });
+          } catch (_) {
+            stream = await openStream({ audio: false, video: true });
           }
 
           video.srcObject = stream;
           await video.play();
+
+          await discoverLenses();
+
+          // 优先切到主摄
+          const wide =
+            lenses.find(function (l) { return l.kind === "wide"; }) || lenses[0];
+          if (wide) {
+            try {
+              await switchToLens(wide);
+            } catch (_) {
+              currentLens = wide;
+              refreshTrackZoomCaps();
+            }
+          } else {
+            refreshTrackZoomCaps();
+          }
+
           gate.classList.remove("show");
           shutter.disabled = false;
-          refreshZoomCapabilities();
+          zoomStack.classList.add("show");
+          renderZoomButtons();
+          await applyLogicalZoom(1, { animate: true });
+          drawDial();
         } finally {
           starting = false;
         }
@@ -514,25 +890,21 @@
       function captureFrame() {
         const width = video.videoWidth;
         const height = video.videoHeight;
-        if (!width || !height) {
-          throw new Error("画面还没就绪");
-        }
+        if (!width || !height) throw new Error("画面还没就绪");
 
         canvas.width = width;
         canvas.height = height;
         const ctx = canvas.getContext("2d");
 
-        // 硬件变焦：画面本身已变焦；数字变焦：从中心裁切
-        if (zoom.hardware || zoom.value <= 1.001) {
+        if (zoom.digital <= 1.001) {
           ctx.drawImage(video, 0, 0, width, height);
         } else {
-          const cropW = width / zoom.value;
-          const cropH = height / zoom.value;
+          const cropW = width / zoom.digital;
+          const cropH = height / zoom.digital;
           const sx = (width - cropW) / 2;
           const sy = (height - cropH) / 2;
           ctx.drawImage(video, sx, sy, cropW, cropH, 0, 0, width, height);
         }
-
         return canvas;
       }
 
@@ -565,19 +937,16 @@
 
       async function savePhoto(blob, filename) {
         const file = new File([blob], filename, { type: "image/jpeg" });
-
         if (navigator.canShare && navigator.canShare({ files: [file] })) {
           await navigator.share({ files: [file] });
           return;
         }
-
         downloadBlob(blob, filename);
         showToast(isIOS() ? "请用分享菜单存到照片" : "已下载", "ok");
       }
 
       async function onShutter() {
-        if (capturing) return;
-
+        if (capturing || switchingLens) return;
         if (!stream) {
           try {
             await startCamera();
@@ -590,7 +959,6 @@
         capturing = true;
         shutter.disabled = true;
         blinkFlash();
-
         try {
           const blob = await canvasToBlob(captureFrame());
           const name =
@@ -599,11 +967,8 @@
             ".jpg";
           await savePhoto(blob, name);
         } catch (err) {
-          if (err && err.name === "AbortError") {
-            showToast("未保存");
-          } else {
-            showToast((err && err.message) || "拍照失败", "err");
-          }
+          if (err && err.name === "AbortError") showToast("未保存");
+          else showToast((err && err.message) || "拍照失败", "err");
         } finally {
           capturing = false;
           shutter.disabled = false;
@@ -621,9 +986,7 @@
       async function tryAutostart() {
         try {
           if (navigator.permissions && navigator.permissions.query) {
-            const status = await navigator.permissions.query({
-              name: "camera",
-            });
+            const status = await navigator.permissions.query({ name: "camera" });
             if (status.state === "granted") {
               await startCamera();
               return;
@@ -634,26 +997,26 @@
             }
           }
         } catch (_) {}
-
         try {
           await startCamera();
         } catch (_) {}
       }
 
       gate.addEventListener("click", onGateTap);
-      gate.addEventListener("keydown", function (event) {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          onGateTap();
-        }
-      });
       shutter.addEventListener("click", onShutter);
 
+      dialWrap.addEventListener("pointerdown", onDialPointerDown);
+      dialWrap.addEventListener("pointermove", onDialPointerMove);
+      dialWrap.addEventListener("pointerup", onDialPointerUp);
+      dialWrap.addEventListener("pointercancel", onDialPointerUp);
+
+      const app = document.getElementById("app");
       app.addEventListener("touchstart", onTouchStart, { passive: true });
       app.addEventListener("touchmove", onTouchMove, { passive: false });
       app.addEventListener("touchend", onTouchEnd);
       app.addEventListener("touchcancel", onTouchEnd);
 
+      window.addEventListener("resize", drawDial);
       document.addEventListener("visibilitychange", function () {
         if (document.hidden || !stream) return;
         video.play().catch(function () {});
