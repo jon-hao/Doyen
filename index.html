@@ -203,6 +203,7 @@
       background: #000;
       cursor: pointer;
       touch-action: manipulation;
+      z-index: 5;
     }
 
     #gate.show { display: flex; }
@@ -226,6 +227,77 @@
       font-size: 13px;
       color: #fbbf24;
     }
+
+    #probe {
+      position: absolute;
+      inset: 0;
+      display: none;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      gap: 14px;
+      padding: 28px 24px;
+      text-align: center;
+      color: #fff;
+      background: rgba(0, 0, 0, 0.92);
+      z-index: 6;
+      touch-action: manipulation;
+    }
+
+    #probe.show { display: flex; }
+
+    #probe h2 {
+      margin: 0;
+      font-size: 20px;
+      font-weight: 600;
+    }
+
+    #probeStatus {
+      margin: 0;
+      color: rgba(255, 255, 255, 0.7);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    #probeList {
+      width: min(360px, 100%);
+      margin: 4px 0 0;
+      padding: 14px 16px;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.08);
+      text-align: left;
+      list-style: none;
+    }
+
+    #probeList li {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 0;
+      font-size: 14px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    #probeList li:last-child {
+      border-bottom: 0;
+    }
+
+    #probeList .ok { color: #4ade80; font-weight: 600; }
+    #probeList .no { color: #f87171; font-weight: 600; }
+    #probeList .label { color: rgba(255, 255, 255, 0.78); }
+
+    #probeEnter {
+      margin-top: 8px;
+      border: 0;
+      border-radius: 12px;
+      padding: 12px 20px;
+      font-size: 16px;
+      font-weight: 600;
+      color: #111;
+      background: #fff;
+    }
+
+    #probeEnter[hidden] { display: none; }
 
     #flash {
       position: absolute;
@@ -262,8 +334,15 @@
 
     <div id="gate" class="show" role="button" tabindex="0" aria-label="轻触开启相机">
       <h1>Doyen</h1>
-      <p>轻触屏幕开启相机</p>
+      <p>轻触开启相机。同意权限后，会先检测是否支持系统变焦和切换镜头。</p>
       <p id="secureHint">需要 HTTPS 才能使用相机</p>
+    </div>
+
+    <div id="probe" aria-live="polite">
+      <h2>能力检测</h2>
+      <p id="probeStatus">正在检测…</p>
+      <ul id="probeList" hidden></ul>
+      <button id="probeEnter" type="button" hidden>进入拍摄</button>
     </div>
   </div>
 
@@ -283,12 +362,19 @@
       const dialWrap = document.getElementById("dialWrap");
       const zoomReadout = document.getElementById("zoomReadout");
       const dialCtx = dialCanvas.getContext("2d");
+      const probe = document.getElementById("probe");
+      const probeStatus = document.getElementById("probeStatus");
+      const probeList = document.getElementById("probeList");
+      const probeEnter = document.getElementById("probeEnter");
 
       let stream = null;
       let starting = false;
       let capturing = false;
       let switchingLens = false;
       let toastTimer = null;
+      let probePassed = false;
+      let supportZoom = false;
+      let supportLensSwitch = false;
 
       /** @type {{deviceId:string,label:string,kind:'ultrawide'|'wide'|'tele',base:number}[]} */
       let lenses = [];
@@ -946,7 +1032,13 @@
             throw new Error("需要 HTTPS 才能使用相机");
           }
 
-          // 尽量申请 zoom 能力（多数 iPhone Safari 仍会忽略）
+          gate.classList.remove("show");
+          probe.classList.add("show");
+          probeEnter.hidden = true;
+          probeList.hidden = true;
+          probeStatus.textContent = "已请求相机权限，请在系统弹窗中允许…";
+
+          // 1) 先拿到权限与预览流
           try {
             stream = await openStream({
               audio: false,
@@ -975,48 +1067,224 @@
           video.srcObject = stream;
           await video.play();
 
-          await discoverLenses();
-
-          // 优先切到主摄
-          const wide =
-            lenses.find(function (l) { return l.kind === "wide"; }) || lenses[0];
-          if (wide) {
-            try {
-              await switchToLens(wide, { notify: false });
-            } catch (_) {
-              currentLens = wide;
-              refreshTrackZoomCaps();
-            }
-          } else {
-            refreshTrackZoomCaps();
+          // 2) 用户已同意后，专门检测 zoom / 切镜头
+          probeStatus.textContent = "权限已获取，正在检测系统变焦与镜头切换…";
+          const report = await runCapabilityProbe();
+          showProbeResult(report);
+        } catch (err) {
+          probe.classList.remove("show");
+          gate.classList.add("show");
+          if (stream) {
+            stream.getTracks().forEach(function (t) { t.stop(); });
+            stream = null;
           }
-
-          const report = describeCapabilities();
-
-          gate.classList.remove("show");
-          shutter.disabled = false;
-          zoomStack.classList.add("show");
-          renderZoomButtons();
-          await applyLogicalZoom(1, { animate: true, quiet: true });
-          updateZoomUI();
-
-          if (report.multiLens || report.hasZoomCap) {
-            toastHardware(
-              report.multiLens && report.hasZoomCap
-                ? "硬件可用：多镜头 + 系统变焦"
-                : report.multiLens
-                  ? "硬件部分可用：可切镜头"
-                  : "硬件部分可用：系统变焦"
-            );
-          } else {
-            showToast(
-              "Safari 未开放物理镜头/硬件变焦，当前为数字变焦",
-              "err"
-            );
-          }
-          drawDial();
+          throw err;
         } finally {
           starting = false;
+        }
+      }
+
+      async function runCapabilityProbe() {
+        probeStatus.textContent = "检测后置摄像头列表…";
+        await discoverLenses();
+
+        const wide =
+          lenses.find(function (l) { return l.kind === "wide"; }) || lenses[0];
+        if (wide) {
+          try {
+            await switchToLens(wide, { notify: false });
+          } catch (_) {
+            currentLens = wide;
+            refreshTrackZoomCaps();
+          }
+        } else {
+          refreshTrackZoomCaps();
+        }
+
+        // --- 检测系统 zoom ---
+        probeStatus.textContent = "检测系统变焦（zoom）…";
+        supportZoom = false;
+        const track = getTrack();
+        refreshTrackZoomCaps();
+
+        if (zoom.hardware && track) {
+          try {
+            const settings =
+              typeof track.getSettings === "function" ? track.getSettings() : {};
+            const current =
+              typeof settings.zoom === "number" ? settings.zoom : zoom.hwMin;
+            const delta = Math.max(
+              zoom.hwMax > zoom.hwMin ? (zoom.hwMax - zoom.hwMin) * 0.02 : 0,
+              0.01
+            );
+            const testZoom = clamp(current + delta, zoom.hwMin, zoom.hwMax);
+            await track.applyConstraints({ advanced: [{ zoom: testZoom }] });
+            await track.applyConstraints({ advanced: [{ zoom: current }] });
+            supportZoom = true;
+          } catch (_) {
+            supportZoom = false;
+            zoom.hardware = false;
+          }
+        }
+
+        // --- 检测能否切换另一颗后置镜头 ---
+        probeStatus.textContent = "检测是否可切换物理镜头…";
+        supportLensSwitch = false;
+
+        const candidates = allBackCameras.filter(function (d) {
+          return !currentLens || d.deviceId !== currentLens.deviceId;
+        });
+
+        // 只有 label 能区分，或存在明显不同 device 时才尝试实切
+        const tryList = lenses.length > 1
+          ? lenses.filter(function (l) {
+              return !currentLens || l.deviceId !== currentLens.deviceId;
+            })
+          : [];
+
+        if (tryList.length) {
+          const target = tryList[0];
+          const beforeId = currentLens && currentLens.deviceId;
+          try {
+            await switchToLens(target, { notify: false });
+            const afterTrack = getTrack();
+            const afterSettings =
+              afterTrack && typeof afterTrack.getSettings === "function"
+                ? afterTrack.getSettings()
+                : {};
+            const afterId = afterSettings.deviceId || (currentLens && currentLens.deviceId);
+            supportLensSwitch = !!(afterId && beforeId && afterId !== beforeId);
+
+            // 切回主摄
+            if (wide) {
+              await switchToLens(wide, { notify: false });
+            }
+          } catch (_) {
+            supportLensSwitch = false;
+            if (wide) {
+              try {
+                await switchToLens(wide, { notify: false });
+              } catch (err2) {}
+            }
+          }
+        } else if (candidates.length >= 1) {
+          // 有多个后置 device，但 label 无法分类：尝试实切第二个
+          const other = candidates[0];
+          const beforeTrack = getTrack();
+          const beforeSettings =
+            beforeTrack && typeof beforeTrack.getSettings === "function"
+              ? beforeTrack.getSettings()
+              : {};
+          const beforeId = beforeSettings.deviceId || (currentLens && currentLens.deviceId);
+          try {
+            const nextStream = await openStream({
+              audio: false,
+              video: {
+                deviceId: { exact: other.deviceId },
+                width: { ideal: 1920 },
+                height: { ideal: 1080 },
+              },
+            });
+            const prev = stream;
+            stream = nextStream;
+            video.srcObject = stream;
+            await video.play();
+            if (prev) prev.getTracks().forEach(function (t) { t.stop(); });
+
+            const afterTrack = getTrack();
+            const afterSettings =
+              afterTrack && typeof afterTrack.getSettings === "function"
+                ? afterTrack.getSettings()
+                : {};
+            const afterId = afterSettings.deviceId;
+            supportLensSwitch = !!(afterId && beforeId && afterId !== beforeId);
+
+            // 切回原来的
+            if (beforeId) {
+              try {
+                const back = await openStream({
+                  audio: false,
+                  video: {
+                    deviceId: { exact: beforeId },
+                    width: { ideal: 1920 },
+                    height: { ideal: 1080 },
+                  },
+                });
+                const old = stream;
+                stream = back;
+                video.srcObject = stream;
+                await video.play();
+                if (old) old.getTracks().forEach(function (t) { t.stop(); });
+              } catch (_) {}
+            }
+            refreshTrackZoomCaps();
+            if (wide) currentLens = wide;
+          } catch (_) {
+            supportLensSwitch = false;
+          }
+        }
+
+        const report = describeCapabilities();
+        report.supportZoom = supportZoom;
+        report.supportLensSwitch = supportLensSwitch;
+        report.backCount = allBackCameras.length;
+        report.classifiedLenses = lenses.length;
+        return report;
+      }
+
+      function showProbeResult(report) {
+        probeStatus.textContent = "检测完成";
+        probeList.hidden = false;
+        probeList.innerHTML =
+          '<li><span class="label">系统变焦 zoom</span><span class="' +
+          (report.supportZoom ? "ok" : "no") +
+          '">' +
+          (report.supportZoom ? "支持" : "不支持") +
+          "</span></li>" +
+          '<li><span class="label">切换物理镜头</span><span class="' +
+          (report.supportLensSwitch ? "ok" : "no") +
+          '">' +
+          (report.supportLensSwitch ? "支持" : "不支持") +
+          "</span></li>" +
+          '<li><span class="label">后置摄像头数量</span><span class="label">' +
+          report.backCount +
+          "</span></li>" +
+          '<li><span class="label">将使用</span><span class="label">' +
+          (report.supportZoom || report.supportLensSwitch
+            ? "尽量走硬件，其余数字变焦"
+            : "数字变焦") +
+          "</span></li>";
+
+        capabilityNote =
+          "zoom " +
+          (report.supportZoom ? "✓" : "✗") +
+          " · 切镜头 " +
+          (report.supportLensSwitch ? "✓" : "✗") +
+          " · 后置 " +
+          report.backCount;
+
+        probeEnter.hidden = false;
+        probePassed = true;
+      }
+
+      async function enterShootMode() {
+        probe.classList.remove("show");
+        shutter.disabled = false;
+        zoomStack.classList.add("show");
+        renderZoomButtons();
+        await applyLogicalZoom(1, { animate: true, quiet: true });
+        updateZoomUI();
+        drawDial();
+
+        if (supportZoom || supportLensSwitch) {
+          toastHardware(
+            "检测结果：zoom " +
+              (supportZoom ? "支持" : "不支持") +
+              "，切镜头 " +
+              (supportLensSwitch ? "支持" : "不支持")
+          );
+        } else {
+          showToast("未检测到硬件变焦/切镜头，将使用数字变焦", "err");
         }
       }
 
@@ -1137,6 +1405,11 @@
 
       gate.addEventListener("click", onGateTap);
       shutter.addEventListener("click", onShutter);
+      probeEnter.addEventListener("click", function () {
+        enterShootMode().catch(function (err) {
+          showToast((err && err.message) || "无法进入拍摄", "err");
+        });
+      });
 
       dialWrap.addEventListener("pointerdown", onDialPointerDown);
       dialWrap.addEventListener("pointermove", onDialPointerMove);
