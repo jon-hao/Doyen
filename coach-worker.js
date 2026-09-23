@@ -1,7 +1,9 @@
 /**
  * Florence-2 Web Worker — 本地看图（首次需下载模型，之后可离线）
+ * 默认走 hf-mirror，避免国内访问 huggingface.co 卡住。
  */
 import {
+  env,
   Florence2ForConditionalGeneration,
   AutoProcessor,
   AutoTokenizer,
@@ -9,7 +11,24 @@ import {
   full,
 } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.1/+esm";
 
+// 浏览器缓存 + 国内镜像（可显著避免“一直加载、进度不动”）
+env.allowLocalModels = false;
+env.useBrowserCache = true;
+env.remoteHost = "https://hf-mirror.com";
+
 const MODEL_ID = "onnx-community/Florence-2-base-ft";
+
+self.postMessage({ status: "boot", data: "Worker 已启动" });
+
+async function hasWebGPU() {
+  try {
+    if (!navigator.gpu) return false;
+    const adapter = await navigator.gpu.requestAdapter();
+    return !!adapter;
+  } catch (_) {
+    return false;
+  }
+}
 
 async function hasFp16() {
   try {
@@ -20,11 +39,38 @@ async function hasFp16() {
   }
 }
 
+function forwardProgress(info) {
+  // 原样转发，主线程统一解析 progress / progress_total
+  try {
+    self.postMessage(
+      Object.assign({ channel: "hf-progress" }, info || { status: "unknown" })
+    );
+  } catch (_) {}
+}
+
 class Florence2Singleton {
   static async getInstance(progress_callback) {
-    this.processor ??= AutoProcessor.from_pretrained(MODEL_ID);
-    this.tokenizer ??= AutoTokenizer.from_pretrained(MODEL_ID);
+    const cb = progress_callback || forwardProgress;
+
+    self.postMessage({ status: "loading", data: "下载处理器…" });
+    this.processor ??= AutoProcessor.from_pretrained(MODEL_ID, {
+      progress_callback: cb,
+    });
+
+    self.postMessage({ status: "loading", data: "下载分词器…" });
+    this.tokenizer ??= AutoTokenizer.from_pretrained(MODEL_ID, {
+      progress_callback: cb,
+    });
+
     this.supports_fp16 ??= await hasFp16();
+    const useGpu = await hasWebGPU();
+    if (!useGpu) {
+      throw new Error(
+        "当前浏览器没有可用的 WebGPU。请用桌面 Chrome / Edge 打开；部分手机浏览器暂不支持。"
+      );
+    }
+
+    self.postMessage({ status: "loading", data: "下载视觉模型（体积较大）…" });
     this.model ??= Florence2ForConditionalGeneration.from_pretrained(MODEL_ID, {
       dtype: {
         embed_tokens: this.supports_fp16 ? "fp16" : "fp32",
@@ -33,8 +79,9 @@ class Florence2Singleton {
         decoder_model_merged: "q4",
       },
       device: "webgpu",
-      progress_callback,
+      progress_callback: cb,
     });
+
     return Promise.all([this.model, this.tokenizer, this.processor]);
   }
 }
@@ -43,26 +90,30 @@ let vision_inputs = null;
 let image_size = null;
 
 async function load() {
-  if (!navigator.gpu) {
-    self.postMessage({
-      status: "error",
-      error: "当前浏览器不支持 WebGPU，无法运行本地视觉模型。请用桌面 Chrome / Edge，或较新的 Safari。",
-    });
-    return;
-  }
-
-  self.postMessage({ status: "loading", data: "正在加载视觉模型…" });
+  self.postMessage({ status: "loading", data: "检查 WebGPU…" });
 
   try {
-    const [model, tokenizer, processor] = await Florence2Singleton.getInstance(
-      function (x) {
-        self.postMessage(x);
-      }
+    if (!(await hasWebGPU())) {
+      self.postMessage({
+        status: "error",
+        error:
+          "当前浏览器不支持 WebGPU，无法运行本地视觉模型。请用桌面版 Chrome 或 Edge。",
+      });
+      return;
+    }
+
+    self.postMessage({
+      status: "loading",
+      data: "开始拉取模型（首次约数百 MB，请保持网络畅通）…",
+    });
+
+    const [model, tokenizer] = await Florence2Singleton.getInstance(
+      forwardProgress
     );
 
     self.postMessage({
       status: "loading",
-      data: "正在编译着色器（首次稍慢）…",
+      data: "编译着色器（第一次会稍慢）…",
     });
 
     const text_inputs = tokenizer("a");
@@ -99,13 +150,26 @@ async function runTask(task) {
   return processor.post_process_generation(generated_text, task, image_size);
 }
 
-async function analyze({ url }) {
+async function analyze(data) {
   const start = performance.now();
   try {
-    const image = await RawImage.fromURL(url);
-    image_size = image.size;
-    vision_inputs = await processorFor(image);
+    let image;
+    if (data && data.buffer) {
+      const blob = new Blob([data.buffer], {
+        type: data.mime || "image/jpeg",
+      });
+      image = await RawImage.fromBlob(blob);
+    } else if (data && data.url) {
+      image = await RawImage.fromURL(data.url);
+    } else {
+      throw new Error("没有可分析的画面");
+    }
 
+    image_size = image.size;
+    const [, , processor] = await Florence2Singleton.getInstance();
+    vision_inputs = await processor(image);
+
+    self.postMessage({ status: "loading", data: "正在理解画面…" });
     const captionTask = "<MORE_DETAILED_CAPTION>";
     const odTask = "<OD>";
     const captionResult = await runTask(captionTask);
@@ -144,13 +208,15 @@ async function analyze({ url }) {
   }
 }
 
-async function processorFor(image) {
-  const [, , processor] = await Florence2Singleton.getInstance();
-  return processor(image);
-}
-
 self.addEventListener("message", async function (e) {
   const msg = e.data || {};
-  if (msg.type === "load") await load();
-  else if (msg.type === "analyze") await analyze(msg.data || {});
+  try {
+    if (msg.type === "load") await load();
+    else if (msg.type === "analyze") await analyze(msg.data || {});
+  } catch (err) {
+    self.postMessage({
+      status: "error",
+      error: (err && err.message) || "Worker 异常",
+    });
+  }
 });

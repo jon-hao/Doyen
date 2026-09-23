@@ -407,6 +407,16 @@
       transition: width 0.15s ease-out;
     }
 
+    #coachProgressBar.indeterminate > i {
+      width: 35% !important;
+      animation: coachPulse 1.1s ease-in-out infinite;
+    }
+
+    @keyframes coachPulse {
+      0% { transform: translateX(-120%); }
+      100% { transform: translateX(320%); }
+    }
+
     #coachCaption {
       margin: 0;
       font-size: 12px;
@@ -1168,20 +1178,47 @@
       let coachReady = false;
       let coachLoading = false;
       let coachRunning = false;
-      let coachProgressTotal = 0;
-      let coachProgressDone = 0;
+      let coachLoadError = null;
+      let coachPulseTimer = null;
 
-      function setCoachProgress(text, ratio) {
+      function coachAssetUrl(fileName) {
+        const path = location.pathname || "/";
+        if (path.endsWith("/")) return path + fileName;
+        if (/\.html?$/i.test(path)) {
+          return path.replace(/[^/]+$/, fileName);
+        }
+        return path + "/" + fileName;
+      }
+
+      function setCoachProgress(text, percentOrNull) {
         coachProgress.classList.add("show");
         coachProgressText.textContent = text || "";
-        if (typeof ratio === "number") {
-          coachProgressFill.style.width = Math.round(ratio * 100) + "%";
+        const bar = document.getElementById("coachProgressBar");
+        if (typeof percentOrNull === "number" && !isNaN(percentOrNull)) {
+          bar.classList.remove("indeterminate");
+          const pct = Math.max(0, Math.min(100, percentOrNull));
+          coachProgressFill.style.width = pct.toFixed(1) + "%";
         }
+      }
+
+      function setCoachIndeterminate(text) {
+        coachProgress.classList.add("show");
+        coachProgressText.textContent = text || "";
+        document
+          .getElementById("coachProgressBar")
+          .classList.add("indeterminate");
       }
 
       function hideCoachProgress() {
         coachProgress.classList.remove("show");
+        document
+          .getElementById("coachProgressBar")
+          .classList.remove("indeterminate");
         coachProgressFill.style.width = "0%";
+        if (coachPulseTimer) {
+          clearInterval(coachPulseTimer);
+          coachPulseTimer = null;
+        }
       }
 
       function showCoachPanel() {
@@ -1208,38 +1245,82 @@
         showCoachPanel();
       }
 
+      function handleCoachProgress(msg) {
+        if (msg.status === "progress_total" && msg.progress != null) {
+          // transformers.js：progress 为 0–100
+          setCoachProgress(
+            "下载模型 " + Number(msg.progress).toFixed(0) + "%",
+            Number(msg.progress)
+          );
+          return;
+        }
+        if (msg.status === "progress" && msg.progress != null) {
+          const file = msg.file ? String(msg.file).split("/").pop() : "文件";
+          setCoachProgress(
+            "下载 " + file + " " + Number(msg.progress).toFixed(0) + "%",
+            Number(msg.progress)
+          );
+        }
+      }
+
+      function waitCoachReady() {
+        return new Promise(function (resolve, reject) {
+          if (coachReady) {
+            resolve();
+            return;
+          }
+          if (coachLoadError) {
+            reject(new Error(coachLoadError));
+            return;
+          }
+          const t0 = Date.now();
+          const timer = setInterval(function () {
+            if (coachReady) {
+              clearInterval(timer);
+              resolve();
+            } else if (coachLoadError) {
+              clearInterval(timer);
+              reject(new Error(coachLoadError));
+            } else if (!coachLoading && !coachReady) {
+              clearInterval(timer);
+              reject(new Error("模型未能就绪"));
+            } else if (Date.now() - t0 > 300000) {
+              clearInterval(timer);
+              reject(new Error("模型加载超时（请检查网络或换桌面 Chrome）"));
+            }
+          }, 200);
+        });
+      }
+
       function ensureCoachWorker() {
         if (coachWorker) return coachWorker;
-        coachWorker = new Worker("./coach-worker.js", { type: "module" });
+        const url = coachAssetUrl("coach-worker.js");
+        coachWorker = new Worker(url, { type: "module" });
         coachWorker.onmessage = function (e) {
           const msg = e.data || {};
-          if (msg.status === "progress" && msg.progress != null) {
-            const file = msg.file ? String(msg.file).split("/").pop() : "模型";
-            setCoachProgress(
-              "下载 " + file + "…",
-              Math.max(0, Math.min(1, Number(msg.progress) || 0))
-            );
-          } else if (msg.status === "initiate") {
-            coachProgressTotal += 1;
-          } else if (msg.status === "done") {
-            coachProgressDone += 1;
-            if (coachProgressTotal > 0) {
-              setCoachProgress(
-                "模型文件 " + coachProgressDone + "/" + coachProgressTotal,
-                coachProgressDone / coachProgressTotal
-              );
-            }
+          if (msg.channel === "hf-progress") {
+            handleCoachProgress(msg);
+            return;
+          }
+          if (msg.status === "boot") {
+            setCoachIndeterminate("引擎已启动，准备下载…");
+          } else if (
+            msg.status === "progress" ||
+            msg.status === "progress_total"
+          ) {
+            handleCoachProgress(msg);
           } else if (msg.status === "loading" && msg.data) {
-            setCoachProgress(String(msg.data), null);
+            setCoachIndeterminate(String(msg.data));
           } else if (msg.status === "ready") {
             coachReady = true;
             coachLoading = false;
-            setCoachProgress("模型就绪，正在看镜头…", 1);
+            coachLoadError = null;
+            setCoachProgress("模型就绪", 100);
           } else if (msg.status === "complete") {
             coachRunning = false;
             coachBtn.classList.remove("busy");
             coachBtn.disabled = false;
-            import("./coach-tips.js")
+            import(coachAssetUrl("coach-tips.js"))
               .then(function (mod) {
                 const focal = findFocal(zoomFactor);
                 const built = mod.buildCoachTips(msg.result, {
@@ -1254,23 +1335,36 @@
           } else if (msg.status === "error") {
             coachLoading = false;
             coachRunning = false;
+            coachLoadError = msg.error || "导演助手出错";
             coachBtn.classList.remove("busy");
             coachBtn.disabled = false;
             hideCoachProgress();
-            showToast(msg.error || "导演助手出错", "err");
+            showToast(coachLoadError, "err");
           }
         };
         coachWorker.onerror = function (err) {
           coachLoading = false;
           coachRunning = false;
+          coachLoadError =
+            (err && (err.message || err.filename)) ||
+            "Worker 加载失败（请确认 coach-worker.js 可访问）";
           coachBtn.classList.remove("busy");
           coachBtn.disabled = false;
-          showToast((err && err.message) || "Worker 加载失败", "err");
+          hideCoachProgress();
+          showToast(String(coachLoadError), "err");
+        };
+        coachWorker.onmessageerror = function () {
+          coachLoading = false;
+          coachRunning = false;
+          coachLoadError = "Worker 消息解析失败";
+          coachBtn.classList.remove("busy");
+          coachBtn.disabled = false;
+          showToast(coachLoadError, "err");
         };
         return coachWorker;
       }
 
-      function frameToObjectUrl() {
+      function frameToArrayBuffer() {
         captureFrame();
         return new Promise(function (resolve, reject) {
           canvas.toBlob(
@@ -1279,7 +1373,12 @@
                 reject(new Error("截取画面失败"));
                 return;
               }
-              resolve(URL.createObjectURL(blob));
+              blob
+                .arrayBuffer()
+                .then(function (buf) {
+                  resolve({ buffer: buf, mime: blob.type || "image/jpeg" });
+                })
+                .catch(reject);
             },
             "image/jpeg",
             0.85
@@ -1294,61 +1393,33 @@
           return;
         }
         coachRunning = true;
+        coachLoadError = null;
         coachBtn.disabled = true;
         coachBtn.classList.add("busy");
         showCoachPanel();
         coachCaption.textContent = "";
         coachTips.innerHTML = "";
-        setCoachProgress("准备本地视觉模型…", 0.02);
+        setCoachIndeterminate("准备本地视觉模型…");
 
         try {
           const worker = ensureCoachWorker();
-          if (!coachReady && !coachLoading) {
-            coachLoading = true;
-            coachProgressTotal = 0;
-            coachProgressDone = 0;
-            worker.postMessage({ type: "load" });
-            // wait until ready or error via polling flag
-            await new Promise(function (resolve, reject) {
-              const t0 = Date.now();
-              const timer = setInterval(function () {
-                if (coachReady) {
-                  clearInterval(timer);
-                  resolve();
-                } else if (!coachLoading && !coachReady) {
-                  clearInterval(timer);
-                  reject(new Error("模型未能就绪"));
-                } else if (Date.now() - t0 > 300000) {
-                  clearInterval(timer);
-                  reject(new Error("模型加载超时"));
-                }
-              }, 200);
-            });
-          } else if (coachLoading) {
-            await new Promise(function (resolve, reject) {
-              const t0 = Date.now();
-              const timer = setInterval(function () {
-                if (coachReady) {
-                  clearInterval(timer);
-                  resolve();
-                } else if (!coachLoading) {
-                  clearInterval(timer);
-                  reject(new Error("模型未能就绪"));
-                } else if (Date.now() - t0 > 300000) {
-                  clearInterval(timer);
-                  reject(new Error("模型加载超时"));
-                }
-              }, 200);
-            });
+          if (!coachReady) {
+            if (!coachLoading) {
+              coachLoading = true;
+              worker.postMessage({ type: "load" });
+            }
+            await waitCoachReady();
           }
 
-          setCoachProgress("正在看当前取景…", 0.92);
-          const url = await frameToObjectUrl();
-          worker.postMessage({ type: "analyze", data: { url: url } });
-          // revoke later
-          setTimeout(function () {
-            URL.revokeObjectURL(url);
-          }, 60000);
+          setCoachIndeterminate("正在看当前取景…");
+          const frame = await frameToArrayBuffer();
+          worker.postMessage(
+            {
+              type: "analyze",
+              data: { buffer: frame.buffer, mime: frame.mime },
+            },
+            [frame.buffer]
+          );
         } catch (err) {
           coachRunning = false;
           coachLoading = false;
