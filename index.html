@@ -483,7 +483,7 @@
           </div>
         </div>
         <div id="bottomRow">
-          <button id="coachBtn" type="button" aria-label="艺术指导" disabled>导演</button>
+          <button id="coachBtn" type="button" aria-label="辅助拍摄" disabled>辅助拍摄</button>
           <button id="shutter" type="button" aria-label="拍照" disabled></button>
           <button id="flipBtn" type="button" aria-label="切换摄像头" disabled>
             <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -1328,7 +1328,7 @@
       async function runCoach() {
         if (!stream || coachRunning) return;
         if (facingMode === "user") {
-          showToast("请切到后置镜头再请导演指导", "err");
+          showToast("请切到后置镜头再使用辅助拍摄", "err");
           return;
         }
         coachRunning = true;
