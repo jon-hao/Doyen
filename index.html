@@ -1234,6 +1234,69 @@
         }
       }
 
+      function cameraProbeDetail(err) {
+        const name = (err && err.name) || "";
+        const msg = (err && err.message) || "";
+        if (name === "NotFoundError" || /Requested device not found/i.test(msg)) {
+          return "未找到摄像头";
+        }
+        if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+          return "权限被拒绝";
+        }
+        if (name === "NotReadableError" || name === "TrackStartError") {
+          return "被其他应用占用";
+        }
+        if (name === "OverconstrainedError") {
+          return "无匹配的摄像头";
+        }
+        if (name === "SecurityError") {
+          return "安全限制";
+        }
+        return msg || name || "打开失败";
+      }
+
+      async function checkCameraDevice() {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          return { ok: false, api: false, detail: "不支持 getUserMedia" };
+        }
+
+        let media = null;
+        try {
+          try {
+            media = await navigator.mediaDevices.getUserMedia({
+              audio: false,
+              video: { facingMode: { ideal: "environment" } },
+            });
+          } catch (firstErr) {
+            // 后置失败时再试任意摄像头，避免误报 NotFound
+            media = await navigator.mediaDevices.getUserMedia({
+              audio: false,
+              video: true,
+            });
+          }
+
+          const track = media.getVideoTracks()[0];
+          const label = (track && track.label) || "";
+          return {
+            ok: true,
+            api: true,
+            detail: label ? "可用 · " + label : "可用",
+          };
+        } catch (err) {
+          return {
+            ok: false,
+            api: true,
+            detail: cameraProbeDetail(err),
+          };
+        } finally {
+          if (media) {
+            media.getTracks().forEach(function (t) {
+              t.stop();
+            });
+          }
+        }
+      }
+
       async function runDeviceProbe() {
         probe.classList.add("show");
         gate.classList.remove("show");
@@ -1245,9 +1308,9 @@
         probeStatus.textContent = "正在检测设备与依赖…";
 
         const httpsOk = isSecureEnough();
-        const cameraApi = !!(
-          navigator.mediaDevices && navigator.mediaDevices.getUserMedia
-        );
+
+        probeStatus.textContent = "检测摄像头…";
+        const camera = await checkCameraDevice();
 
         probeStatus.textContent = "检测 WebGPU…";
         const gpu = await checkWebGPU();
@@ -1268,9 +1331,13 @@
               ? "可用（WebGPU · " + mirror.detail + "）"
               : "可用（WASM · " + mirror.detail + "）";
 
+        const shootOk = httpsOk && camera.ok;
+
         deviceReport = {
           https: httpsOk,
-          cameraApi: cameraApi,
+          cameraApi: camera.api,
+          cameraOk: camera.ok,
+          cameraDetail: camera.detail,
           webgpu: gpu.ok,
           transformers: tf.ok,
           hfMirror: mirror.ok,
@@ -1283,9 +1350,9 @@
         probeList.innerHTML =
           probeRow("HTTPS / 安全上下文", httpsOk ? "ok" : "no", httpsOk ? "通过" : "失败") +
           probeRow(
-            "相机 API",
-            cameraApi ? "ok" : "no",
-            cameraApi ? "getUserMedia" : "不支持"
+            "摄像头",
+            camera.ok ? "ok" : "no",
+            camera.detail
           ) +
           probeRow("WebGPU", gpu.ok ? "ok" : "warn", gpu.detail) +
           probeRow("Transformers.js", tf.ok ? "ok" : "no", tf.detail) +
@@ -1301,7 +1368,15 @@
           );
 
         probeNote.hidden = false;
-        if (!assistOk) {
+        if (!httpsOk) {
+          probeNote.textContent =
+            "需要 HTTPS（或 localhost）才能使用相机。请用 GitHub Pages 链接打开。";
+        } else if (!camera.ok) {
+          probeNote.textContent =
+            "当前环境无法打开摄像头（" +
+            camera.detail +
+            "）。请确认本机有摄像头、已授权浏览器权限，或换有摄像头的设备后再点「重新检测」。";
+        } else if (!assistOk) {
           probeNote.textContent =
             "当前环境无法使用「辅助拍摄」。拍照仍可进入。可点「重新检测」，或换网络 / 桌面 Chrome 后再试。";
         } else if (!gpu.ok) {
@@ -1315,12 +1390,8 @@
         probeStatus.textContent = "检测完成";
         probeEnter.hidden = false;
         probeRetry.hidden = false;
-        probeEnter.disabled = !(httpsOk && cameraApi);
-        if (!httpsOk || !cameraApi) {
-          probeEnter.textContent = "环境不满足，无法拍摄";
-        } else {
-          probeEnter.textContent = "进入拍摄";
-        }
+        probeEnter.disabled = !shootOk;
+        probeEnter.textContent = shootOk ? "进入拍摄" : "环境不满足，无法拍摄";
       }
 
       async function startCamera() {
@@ -1359,12 +1430,11 @@
             stream = null;
           }
           controls.classList.remove("show");
-          probe.classList.remove("show");
-          gate.classList.add("show");
-          const msg = (err && err.message) || "无法打开相机";
-          const gateText = gate.querySelector("p:not(#secureHint)");
-          if (gateText) gateText.textContent = msg + "，轻触重试";
+          gate.classList.remove("show");
+          const msg = cameraProbeDetail(err) || (err && err.message) || "无法打开相机";
           showToast(msg, "err");
+          // 回环境检测页拦下，避免黑底「轻触重试」空页
+          await runDeviceProbe();
         } finally {
           starting = false;
         }
