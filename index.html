@@ -27,7 +27,7 @@
       background: #000;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       overflow: hidden;
-      touch-action: manipulation;
+      touch-action: none;
     }
 
     #app {
@@ -35,6 +35,7 @@
       width: 100%;
       height: 100%;
       background: #000;
+      overflow: hidden;
     }
 
     #preview {
@@ -44,6 +45,12 @@
       height: 100%;
       object-fit: cover;
       background: #000;
+      transform-origin: center center;
+      transition: transform 0.12s ease-out;
+    }
+
+    #preview.pinching {
+      transition: none;
     }
 
     #overlay {
@@ -59,7 +66,7 @@
 
     #toast {
       min-height: 24px;
-      margin-bottom: 18px;
+      margin-bottom: 14px;
       padding: 8px 14px;
       border-radius: 999px;
       background: rgba(0, 0, 0, 0.55);
@@ -82,6 +89,43 @@
 
     #toast.err {
       background: rgba(220, 38, 38, 0.85);
+    }
+
+    #zoomBar {
+      pointer-events: auto;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      margin-bottom: 22px;
+      padding: 6px 8px;
+      border-radius: 999px;
+      background: rgba(0, 0, 0, 0.38);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+    }
+
+    #zoomBar.show {
+      display: flex;
+    }
+
+    .zoom-btn {
+      min-width: 42px;
+      height: 42px;
+      padding: 0 8px;
+      border: 0;
+      border-radius: 50%;
+      background: transparent;
+      color: rgba(255, 255, 255, 0.78);
+      font-size: 13px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .zoom-btn.active {
+      background: rgba(255, 255, 255, 0.2);
+      color: #f5d76e;
+      font-size: 14px;
     }
 
     #shutter {
@@ -126,6 +170,7 @@
       color: #fff;
       background: #000;
       cursor: pointer;
+      touch-action: manipulation;
     }
 
     #gate.show {
@@ -180,6 +225,7 @@
 
     <div id="overlay">
       <div id="toast"></div>
+      <div id="zoomBar" aria-label="变焦"></div>
       <button id="shutter" type="button" aria-label="拍照" disabled></button>
     </div>
 
@@ -199,13 +245,25 @@
       const gate = document.getElementById("gate");
       const secureHint = document.getElementById("secureHint");
       const flash = document.getElementById("flash");
+      const zoomBar = document.getElementById("zoomBar");
+      const app = document.getElementById("app");
 
       let stream = null;
       let starting = false;
       let capturing = false;
       let toastTimer = null;
-      let lastBlob = null;
-      let lastName = "";
+
+      const zoom = {
+        value: 1,
+        min: 1,
+        max: 5,
+        hardware: false,
+        presets: [1, 2],
+      };
+
+      let pinchActive = false;
+      let pinchStartDistance = 0;
+      let pinchStartZoom = 1;
 
       function isSecureEnough() {
         return (
@@ -217,8 +275,10 @@
       }
 
       function isIOS() {
-        return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-          (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+        return (
+          /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+          (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)
+        );
       }
 
       if (!isSecureEnough()) {
@@ -239,6 +299,175 @@
         setTimeout(function () {
           flash.classList.remove("show");
         }, 90);
+      }
+
+      function getTrack() {
+        return stream ? stream.getVideoTracks()[0] : null;
+      }
+
+      function clamp(n, min, max) {
+        return Math.min(max, Math.max(min, n));
+      }
+
+      function formatZoomLabel(value) {
+        if (Math.abs(value - 0.5) < 0.05) return ".5";
+        const rounded = Math.round(value * 10) / 10;
+        if (Number.isInteger(rounded)) return String(rounded);
+        return rounded.toFixed(1);
+      }
+
+      function buildPresets(min, max) {
+        const presets = [];
+        if (min <= 0.55) presets.push(0.5);
+        presets.push(1);
+        if (max >= 1.8) presets.push(2);
+        if (max >= 2.8) presets.push(3);
+        if (max >= 4.5) presets.push(5);
+        return presets;
+      }
+
+      function refreshZoomCapabilities() {
+        const track = getTrack();
+        let min = 1;
+        let max = 5;
+        let hardware = false;
+
+        if (track && typeof track.getCapabilities === "function") {
+          const caps = track.getCapabilities();
+          if (caps && caps.zoom) {
+            hardware = true;
+            min = caps.zoom.min;
+            max = caps.zoom.max;
+            const settings =
+              typeof track.getSettings === "function" ? track.getSettings() : {};
+            if (typeof settings.zoom === "number") {
+              zoom.value = settings.zoom;
+            }
+          }
+        }
+
+        // 没有硬件 zoom 时，用画面数字变焦（网页常见回退）
+        if (!hardware) {
+          min = 1;
+          max = 5;
+        }
+
+        zoom.min = min;
+        zoom.max = max;
+        zoom.hardware = hardware;
+        zoom.presets = buildPresets(min, max);
+        zoom.value = clamp(zoom.value, min, max);
+        renderZoomBar();
+        applyZoom(zoom.value, false);
+      }
+
+      function renderZoomBar() {
+        zoomBar.innerHTML = "";
+        zoom.presets.forEach(function (preset) {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "zoom-btn";
+          btn.dataset.zoom = String(preset);
+          btn.textContent = formatZoomLabel(preset) + "x";
+          btn.addEventListener("click", function (event) {
+            event.stopPropagation();
+            applyZoom(preset, true);
+          });
+          zoomBar.appendChild(btn);
+        });
+        zoomBar.classList.add("show");
+        updateZoomButtons();
+      }
+
+      function nearestPreset(value) {
+        let best = zoom.presets[0];
+        let bestDist = Math.abs(value - best);
+        zoom.presets.forEach(function (preset) {
+          const dist = Math.abs(value - preset);
+          if (dist < bestDist) {
+            best = preset;
+            bestDist = dist;
+          }
+        });
+        return best;
+      }
+
+      function updateZoomButtons() {
+        const activePreset = nearestPreset(zoom.value);
+        const showExact =
+          Math.abs(zoom.value - activePreset) > 0.08 ||
+          pinchActive ||
+          Math.abs(zoom.value - Math.round(zoom.value)) > 0.05;
+
+        Array.prototype.forEach.call(
+          zoomBar.querySelectorAll(".zoom-btn"),
+          function (btn) {
+            const preset = Number(btn.dataset.zoom);
+            const isActive = Math.abs(preset - activePreset) < 0.01;
+            btn.classList.toggle("active", isActive);
+            if (isActive && showExact) {
+              btn.textContent = formatZoomLabel(zoom.value) + "x";
+            } else {
+              btn.textContent = formatZoomLabel(preset) + "x";
+            }
+          }
+        );
+      }
+
+      function applyZoom(value, animate) {
+        zoom.value = clamp(value, zoom.min, zoom.max);
+        const track = getTrack();
+
+        if (zoom.hardware && track) {
+          video.classList.toggle("pinching", !animate);
+          video.style.transform = "none";
+          track
+            .applyConstraints({ advanced: [{ zoom: zoom.value }] })
+            .catch(function () {
+              // 部分机型会失败，回退数字变焦
+              zoom.hardware = false;
+              zoom.min = 1;
+              zoom.max = Math.max(zoom.max, 5);
+              video.style.transform = "scale(" + zoom.value + ")";
+            });
+        } else {
+          video.classList.toggle("pinching", !animate);
+          video.style.transform = "scale(" + zoom.value + ")";
+        }
+
+        updateZoomButtons();
+      }
+
+      function touchDistance(touches) {
+        const dx = touches[0].clientX - touches[1].clientX;
+        const dy = touches[0].clientY - touches[1].clientY;
+        return Math.hypot(dx, dy);
+      }
+
+      function onTouchStart(event) {
+        if (event.touches.length === 2 && stream) {
+          pinchActive = true;
+          pinchStartDistance = touchDistance(event.touches);
+          pinchStartZoom = zoom.value;
+          video.classList.add("pinching");
+        }
+      }
+
+      function onTouchMove(event) {
+        if (!pinchActive || event.touches.length !== 2) return;
+        event.preventDefault();
+        const distance = touchDistance(event.touches);
+        if (pinchStartDistance <= 0) return;
+        const next = pinchStartZoom * (distance / pinchStartDistance);
+        applyZoom(next, false);
+      }
+
+      function onTouchEnd(event) {
+        if (event.touches.length < 2) {
+          pinchActive = false;
+          video.classList.remove("pinching");
+          updateZoomButtons();
+        }
       }
 
       async function startCamera() {
@@ -276,6 +505,7 @@
           await video.play();
           gate.classList.remove("show");
           shutter.disabled = false;
+          refreshZoomCapabilities();
         } finally {
           starting = false;
         }
@@ -287,9 +517,22 @@
         if (!width || !height) {
           throw new Error("画面还没就绪");
         }
+
         canvas.width = width;
         canvas.height = height;
-        canvas.getContext("2d").drawImage(video, 0, 0, width, height);
+        const ctx = canvas.getContext("2d");
+
+        // 硬件变焦：画面本身已变焦；数字变焦：从中心裁切
+        if (zoom.hardware || zoom.value <= 1.001) {
+          ctx.drawImage(video, 0, 0, width, height);
+        } else {
+          const cropW = width / zoom.value;
+          const cropH = height / zoom.value;
+          const sx = (width - cropW) / 2;
+          const sy = (height - cropH) / 2;
+          ctx.drawImage(video, sx, sy, cropW, cropH, 0, 0, width, height);
+        }
+
         return canvas;
       }
 
@@ -321,11 +564,8 @@
       }
 
       async function savePhoto(blob, filename) {
-        lastBlob = blob;
-        lastName = filename;
         const file = new File([blob], filename, { type: "image/jpeg" });
 
-        // iPhone：同一手势里立刻调起系统分享，少一步「再点保存」
         if (navigator.canShare && navigator.canShare({ files: [file] })) {
           await navigator.share({ files: [file] });
           return;
@@ -360,7 +600,6 @@
           await savePhoto(blob, name);
         } catch (err) {
           if (err && err.name === "AbortError") {
-            // 用户关掉了分享面板：保留原图，提示可再点快门旁逻辑——这里轻提示即可
             showToast("未保存");
           } else {
             showToast((err && err.message) || "拍照失败", "err");
@@ -380,7 +619,6 @@
       }
 
       async function tryAutostart() {
-        // 已授权过时，多数浏览器允许自动打开，跳过「再点一次」
         try {
           if (navigator.permissions && navigator.permissions.query) {
             const status = await navigator.permissions.query({
@@ -395,15 +633,11 @@
               return;
             }
           }
-        } catch (_) {
-          // Safari 可能不支持 permissions.query，继续尝试直接打开
-        }
+        } catch (_) {}
 
         try {
           await startCamera();
-        } catch (_) {
-          // 需要用户手势：保留「轻触屏幕」
-        }
+        } catch (_) {}
       }
 
       gate.addEventListener("click", onGateTap);
@@ -414,6 +648,11 @@
         }
       });
       shutter.addEventListener("click", onShutter);
+
+      app.addEventListener("touchstart", onTouchStart, { passive: true });
+      app.addEventListener("touchmove", onTouchMove, { passive: false });
+      app.addEventListener("touchend", onTouchEnd);
+      app.addEventListener("touchcancel", onTouchEnd);
 
       document.addEventListener("visibilitychange", function () {
         if (document.hidden || !stream) return;
