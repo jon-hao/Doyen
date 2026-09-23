@@ -1234,14 +1234,14 @@
         const mctx = mask.getContext("2d");
         const grd = mctx.createRadialGradient(
           width * 0.5,
-          height * 0.42,
-          Math.min(width, height) * 0.12,
+          height * 0.45,
+          Math.min(width, height) * 0.22,
           width * 0.5,
-          height * 0.42,
-          Math.min(width, height) * 0.42
+          height * 0.45,
+          Math.min(width, height) * 0.62
         );
         grd.addColorStop(0, "rgba(0,0,0,1)");
-        grd.addColorStop(0.55, "rgba(0,0,0," + (0.85 - strength * 0.2).toFixed(2) + ")");
+        grd.addColorStop(0.55, "rgba(0,0,0," + (0.75 - strength * 0.15).toFixed(2) + ")");
         grd.addColorStop(1, "rgba(0,0,0,0)");
         mctx.fillStyle = grd;
         mctx.fillRect(0, 0, width, height);
