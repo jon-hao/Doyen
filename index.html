@@ -306,6 +306,8 @@
       let pinchStartDistance = 0;
       let pinchStartZoom = 1;
       let switchToken = 0;
+      let lastHwZoomToastAt = 0;
+      let pendingHwZoomToast = false;
 
       // 镜头切换滞回，避免转盘在边界抖切
       const HYST = {
@@ -498,6 +500,29 @@
         return zoom.hardware ? "系统变焦" : "数字变焦";
       }
 
+      function toastHardware(message) {
+        showToast(message, "ok");
+      }
+
+      function toastHardwareZoom(force) {
+        const now = Date.now();
+        if (!force && now - lastHwZoomToastAt < 900) {
+          pendingHwZoomToast = true;
+          return;
+        }
+        lastHwZoomToastAt = now;
+        pendingHwZoomToast = false;
+        toastHardware(
+          "硬件：系统变焦 " + formatZoomLabel(zoom.value) + "x"
+        );
+      }
+
+      function flushHardwareZoomToast() {
+        if (pendingHwZoomToast) {
+          toastHardwareZoom(true);
+        }
+      }
+
       function refreshTrackZoomCaps() {
         const track = getTrack();
         zoom.hardware = false;
@@ -517,11 +542,12 @@
         return navigator.mediaDevices.getUserMedia(constraints);
       }
 
-      async function switchToLens(lens) {
-        if (!lens) return;
+      async function switchToLens(lens, options) {
+        options = options || {};
+        if (!lens) return false;
         if (currentLens && currentLens.deviceId === lens.deviceId) {
           currentLens = lens;
-          return;
+          return false;
         }
 
         const token = ++switchToken;
@@ -555,7 +581,7 @@
 
           if (token !== switchToken) {
             nextStream.getTracks().forEach(function (t) { t.stop(); });
-            return;
+            return false;
           }
 
           const prev = stream;
@@ -566,6 +592,11 @@
 
           currentLens = lens;
           refreshTrackZoomCaps();
+
+          if (options.notify !== false) {
+            toastHardware("硬件：已切换" + lensCaption(lens));
+          }
+          return true;
         } finally {
           if (token === switchToken) switchingLens = false;
         }
@@ -582,12 +613,13 @@
       async function applyLogicalZoom(logicalZoom, options) {
         options = options || {};
         const animate = !!options.animate;
+        const quiet = !!options.quiet;
         zoom.value = clamp(logicalZoom, zoom.min, zoom.max);
 
         const target = pickLensForZoom(zoom.value, currentLens);
         if (target && (!currentLens || target.deviceId !== currentLens.deviceId)) {
           try {
-            await switchToLens(target);
+            await switchToLens(target, { notify: !quiet });
           } catch (err) {
             // 切镜头失败则继续在当前镜头上变焦
           }
@@ -602,6 +634,10 @@
           video.style.transform = "none";
           try {
             await track.applyConstraints({ advanced: [{ zoom: hwZoom }] });
+            if (!quiet) {
+              // 点击倍率：立刻提示；转盘/捏合：节流，松手后再提示
+              toastHardwareZoom(!!animate || !!options.forceHwToast);
+            }
           } catch (_) {
             // 硬件失败 → 数字
             zoom.hardware = false;
@@ -795,6 +831,7 @@
           dialWrap.releasePointerCapture(event.pointerId);
         } catch (_) {}
         video.classList.remove("dragging");
+        flushHardwareZoomToast();
         updateZoomUI();
       }
 
@@ -827,6 +864,7 @@
         if (event.touches.length < 2) {
           pinchActive = false;
           video.classList.remove("dragging");
+          flushHardwareZoomToast();
           updateZoomUI();
         }
       }
@@ -867,7 +905,7 @@
             lenses.find(function (l) { return l.kind === "wide"; }) || lenses[0];
           if (wide) {
             try {
-              await switchToLens(wide);
+              await switchToLens(wide, { notify: false });
             } catch (_) {
               currentLens = wide;
               refreshTrackZoomCaps();
@@ -880,7 +918,14 @@
           shutter.disabled = false;
           zoomStack.classList.add("show");
           renderZoomButtons();
-          await applyLogicalZoom(1, { animate: true });
+          await applyLogicalZoom(1, { animate: true, quiet: true });
+          if (lenses.length > 1) {
+            toastHardware(
+              "硬件：已发现 " + lenses.length + " 个后置镜头"
+            );
+          } else if (zoom.hardware) {
+            toastHardware("硬件：当前镜头支持系统变焦");
+          }
           drawDial();
         } finally {
           starting = false;
