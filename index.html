@@ -156,6 +156,10 @@
       font-size: 11px;
       color: rgba(255, 255, 255, 0.55);
       min-height: 14px;
+      text-align: center;
+      max-width: 92vw;
+      line-height: 1.35;
+      padding: 0 8px;
     }
 
     #shutter {
@@ -289,6 +293,8 @@
       /** @type {{deviceId:string,label:string,kind:'ultrawide'|'wide'|'tele',base:number}[]} */
       let lenses = [];
       let currentLens = null;
+      let allBackCameras = [];
+      let capabilityNote = "检测中…";
 
       const zoom = {
         value: 1,
@@ -401,17 +407,31 @@
 
       async function discoverLenses() {
         const devices = await navigator.mediaDevices.enumerateDevices();
-        const videos = devices.filter(function (d) {
+        allBackCameras = devices.filter(function (d) {
           return d.kind === "videoinput" && d.deviceId && !isFrontLabel(d.label);
         });
 
         const found = [];
         const usedKinds = {};
 
-        videos.forEach(function (device) {
+        allBackCameras.forEach(function (device) {
           const info = classifyDevice(device);
-          // 每类镜头优先保留一个
+          // 每类镜头优先保留一个（仅当 label 能区分时才有意义）
           if (usedKinds[info.kind]) return;
+          // 若 label 都是笼统的 Back Camera，不要假装有多颗镜头
+          const label = (device.label || "").toLowerCase();
+          const distinctive =
+            label.includes("ultra") ||
+            label.includes("tele") ||
+            label.includes("超广") ||
+            label.includes("长焦") ||
+            label.includes("wide") ||
+            label.includes("dual") ||
+            label.includes("triple");
+          if (!distinctive && allBackCameras.length <= 2) {
+            // iPhone 常见：Front + Back，无法区分超广/长焦
+            return;
+          }
           usedKinds[info.kind] = true;
           found.push({
             deviceId: device.deviceId,
@@ -438,11 +458,8 @@
         });
 
         // 无级范围：有超广则从 0.5，否则从 1；上限看长焦/数字
-        zoom.min = lenses.some(function (l) {
-          return l.kind === "ultrawide";
-        })
-          ? 0.5
-          : 1;
+        // 即使没有超广硬件，也保留 0.5 UI，用数字变焦模拟观感
+        zoom.min = 0.5;
 
         const tele = lenses.find(function (l) {
           return l.kind === "tele";
@@ -450,6 +467,48 @@
         zoom.max = tele ? Math.max(5, tele.base * 2) : 5;
 
         zoom.presets = buildPresets(zoom.min, zoom.max, lenses);
+      }
+
+      function describeCapabilities() {
+        const track = getTrack();
+        const label = track ? track.label || "未命名相机" : "无";
+        const caps =
+          track && typeof track.getCapabilities === "function"
+            ? track.getCapabilities()
+            : {};
+        const settings =
+          track && typeof track.getSettings === "function"
+            ? track.getSettings()
+            : {};
+        const hasZoomCap = !!(caps && caps.zoom);
+        const multiLens = lenses.length > 1;
+        const backCount = allBackCameras.length;
+
+        if (multiLens && hasZoomCap) {
+          capabilityNote =
+            "硬件可用：多镜头 + 系统变焦｜" + label;
+        } else if (multiLens) {
+          capabilityNote =
+            "部分硬件：可切镜头，无系统 zoom｜" + label;
+        } else if (hasZoomCap) {
+          capabilityNote =
+            "部分硬件：单镜头系统变焦｜" + label;
+        } else {
+          capabilityNote =
+            "数字变焦（Safari 未开放物理镜头/zoom）｜后置设备 " +
+            backCount +
+            " 个｜" +
+            label;
+        }
+
+        return {
+          hasZoomCap,
+          multiLens,
+          backCount,
+          label,
+          zoomSettings: settings.zoom,
+          zoomCaps: caps.zoom || null,
+        };
       }
 
       function buildPresets(min, max, lensList) {
@@ -689,7 +748,12 @@
 
       function updateZoomUI() {
         zoomReadout.textContent = formatZoomLabel(zoom.value) + "x";
-        lensHint.textContent = lensCaption(currentLens);
+        const mode = zoom.hardware
+          ? "系统变焦"
+          : lenses.length > 1
+            ? lensCaption(currentLens)
+            : "数字变焦";
+        lensHint.textContent = mode + " · " + capabilityNote;
 
         const activePreset = nearestPreset(zoom.value);
         const showExact = Math.abs(zoom.value - activePreset) > 0.06;
@@ -882,6 +946,7 @@
             throw new Error("需要 HTTPS 才能使用相机");
           }
 
+          // 尽量申请 zoom 能力（多数 iPhone Safari 仍会忽略）
           try {
             stream = await openStream({
               audio: false,
@@ -889,10 +954,22 @@
                 facingMode: { ideal: "environment" },
                 width: { ideal: 1920 },
                 height: { ideal: 1080 },
+                zoom: true,
               },
             });
           } catch (_) {
-            stream = await openStream({ audio: false, video: true });
+            try {
+              stream = await openStream({
+                audio: false,
+                video: {
+                  facingMode: { ideal: "environment" },
+                  width: { ideal: 1920 },
+                  height: { ideal: 1080 },
+                },
+              });
+            } catch (err2) {
+              stream = await openStream({ audio: false, video: true });
+            }
           }
 
           video.srcObject = stream;
@@ -914,17 +991,28 @@
             refreshTrackZoomCaps();
           }
 
+          const report = describeCapabilities();
+
           gate.classList.remove("show");
           shutter.disabled = false;
           zoomStack.classList.add("show");
           renderZoomButtons();
           await applyLogicalZoom(1, { animate: true, quiet: true });
-          if (lenses.length > 1) {
+          updateZoomUI();
+
+          if (report.multiLens || report.hasZoomCap) {
             toastHardware(
-              "硬件：已发现 " + lenses.length + " 个后置镜头"
+              report.multiLens && report.hasZoomCap
+                ? "硬件可用：多镜头 + 系统变焦"
+                : report.multiLens
+                  ? "硬件部分可用：可切镜头"
+                  : "硬件部分可用：系统变焦"
             );
-          } else if (zoom.hardware) {
-            toastHardware("硬件：当前镜头支持系统变焦");
+          } else {
+            showToast(
+              "Safari 未开放物理镜头/硬件变焦，当前为数字变焦",
+              "err"
+            );
           }
           drawDial();
         } finally {
