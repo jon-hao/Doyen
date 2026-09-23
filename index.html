@@ -90,26 +90,28 @@
     #toast {
       position: absolute;
       left: 50%;
-      bottom: calc(168px + var(--safe-bottom));
+      top: calc(12px + var(--safe-top));
+      bottom: auto;
       transform: translateX(-50%);
       min-height: 24px;
       margin-bottom: 0;
-      padding: 8px 14px;
-      border-radius: 999px;
+      padding: 10px 16px;
+      border-radius: 14px;
       background: rgba(0, 0, 0, 0.55);
       color: #fff;
       font-size: 14px;
+      line-height: 1.4;
       opacity: 0;
       transition: opacity 0.2s ease;
       pointer-events: none;
       text-align: center;
-      max-width: 90%;
-      z-index: 3;
+      max-width: min(92vw, 360px);
+      z-index: 20;
     }
 
     #toast.show { opacity: 1; }
-    #toast.ok { background: rgba(22, 163, 74, 0.85); }
-    #toast.err { background: rgba(220, 38, 38, 0.85); }
+    #toast.ok { background: rgba(22, 163, 74, 0.92); }
+    #toast.err { background: rgba(220, 38, 38, 0.92); }
 
     #controls {
       pointer-events: auto;
@@ -342,13 +344,13 @@
       left: 12px;
       right: 12px;
       bottom: calc(120px + var(--safe-bottom));
-      z-index: 4;
+      z-index: 8;
       display: none;
       flex-direction: column;
       gap: 10px;
       padding: 14px 16px 16px;
       border-radius: 18px;
-      background: rgba(0, 0, 0, 0.72);
+      background: rgba(0, 0, 0, 0.82);
       backdrop-filter: blur(16px);
       -webkit-backdrop-filter: blur(16px);
       color: #fff;
@@ -358,6 +360,18 @@
     }
 
     #coachPanel.show { display: flex; }
+
+    #coachPanel.err {
+      border: 1px solid rgba(248, 113, 113, 0.55);
+    }
+
+    #coachCaption.err {
+      color: #fca5a5;
+      font-size: 13px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
 
     #coachPanel header {
       display: flex;
@@ -605,7 +619,22 @@
         clearTimeout(toastTimer);
         toastTimer = setTimeout(function () {
           toast.className = "";
-        }, 1800);
+        }, type === "err" ? 4500 : 1800);
+      }
+
+      function showCoachError(message) {
+        hideCoachProgress();
+        coachPanel.classList.add("show");
+        coachPanel.classList.add("err");
+        coachCaption.classList.add("err");
+        coachCaption.textContent = message || "导演助手出错";
+        coachTips.innerHTML = "";
+        showToast(message || "导演助手出错", "err");
+      }
+
+      function clearCoachErrorState() {
+        coachPanel.classList.remove("err");
+        coachCaption.classList.remove("err");
       }
 
       function blinkFlash() {
@@ -1231,6 +1260,7 @@
 
       function renderCoachResult(payload) {
         hideCoachProgress();
+        clearCoachErrorState();
         const caption = (payload && payload.caption) || "";
         const tips = (payload && payload.tips) || [];
         coachCaption.textContent = caption
@@ -1330,7 +1360,7 @@
                 renderCoachResult(built);
               })
               .catch(function (err) {
-                showToast((err && err.message) || "生成建议失败", "err");
+                showCoachError((err && err.message) || "生成建议失败");
               });
           } else if (msg.status === "error") {
             coachLoading = false;
@@ -1338,8 +1368,7 @@
             coachLoadError = msg.error || "导演助手出错";
             coachBtn.classList.remove("busy");
             coachBtn.disabled = false;
-            hideCoachProgress();
-            showToast(coachLoadError, "err");
+            showCoachError(coachLoadError);
           }
         };
         coachWorker.onerror = function (err) {
@@ -1350,8 +1379,7 @@
             "Worker 加载失败（请确认 coach-worker.js 可访问）";
           coachBtn.classList.remove("busy");
           coachBtn.disabled = false;
-          hideCoachProgress();
-          showToast(String(coachLoadError), "err");
+          showCoachError(String(coachLoadError));
         };
         coachWorker.onmessageerror = function () {
           coachLoading = false;
@@ -1359,7 +1387,7 @@
           coachLoadError = "Worker 消息解析失败";
           coachBtn.classList.remove("busy");
           coachBtn.disabled = false;
-          showToast(coachLoadError, "err");
+          showCoachError(coachLoadError);
         };
         return coachWorker;
       }
@@ -1397,6 +1425,7 @@
         coachBtn.disabled = true;
         coachBtn.classList.add("busy");
         showCoachPanel();
+        clearCoachErrorState();
         coachCaption.textContent = "";
         coachTips.innerHTML = "";
         setCoachIndeterminate("准备本地视觉模型…");
@@ -1425,8 +1454,7 @@
           coachLoading = false;
           coachBtn.classList.remove("busy");
           coachBtn.disabled = false;
-          hideCoachProgress();
-          showToast((err && err.message) || "指导失败", "err");
+          showCoachError((err && err.message) || "指导失败");
         }
       }
 
