@@ -1592,7 +1592,7 @@
         } else {
           base = pathName + "/" + fileName;
         }
-        return base + "?v=20260924-assist1";
+        return base + "?v=20260924-loadfix1";
       }
 
       function setCoachHint(text) {
@@ -1822,15 +1822,19 @@
           } catch (_) {}
           setCoachBtnProgress(0);
           setCoachHint("");
+          coachReady = false;
           const raw = (err && err.message) || "";
           const paused =
             (err && err.name === "AbortError") ||
             /abort|interrupted|中断/i.test(raw);
           let msg = raw || "资源加载失败";
-          if (/Load failed/i.test(raw)) {
-            msg = "模型引擎加载失败，请强刷后重试";
+          if (/Load failed|引擎启动失败|module script failed/i.test(raw)) {
+            msg =
+              "模型引擎启动失败，请关闭其他标签页后重试（iPhone 上较吃内存）";
           } else if (/Failed to fetch|NetworkError|network/i.test(raw)) {
             msg = "网络中断，再次点击可继续下载";
+          } else if (/not found locally|allowRemoteModels/i.test(raw)) {
+            msg = "本地缓存不完整，请再点一次重新下载";
           }
           showToast(paused ? "下载已暂停，再次点击可继续" : msg, "err");
           return false;

@@ -17,18 +17,35 @@ import {
   hasIncompleteDownloads,
   estimateResumeProgress,
   flushActiveDownloads,
-} from "./resume-download.js?v=20260924-assist1";
+} from "./resume-download.js?v=20260924-loadfix1";
 
 env.allowLocalModels = false;
 env.useBrowserCache = true;
 
-// iOS Safari：多线程 / proxy Worker 常直接 “Load failed”
-try {
-  if (env.backends && env.backends.onnx && env.backends.onnx.wasm) {
-    env.backends.onnx.wasm.numThreads = 1;
-    env.backends.onnx.wasm.proxy = false;
+function isAppleMobileBrowser() {
+  try {
+    const ua = String(navigator.userAgent || "");
+    const touchMac = /\bMac\b/.test(ua) && navigator.maxTouchPoints > 1;
+    return /iPhone|iPad|iPod/i.test(ua) || touchMac;
+  } catch (_) {
+    return false;
   }
-} catch (_) {}
+}
+
+function configureOnnxBackend() {
+  try {
+    if (!env.backends || !env.backends.onnx || !env.backends.onnx.wasm) return;
+    const wasm = env.backends.onnx.wasm;
+    // iOS Safari：多线程 / proxy Worker 常直接 TypeError: Load failed
+    wasm.numThreads = 1;
+    wasm.proxy = false;
+    // 固定从 jsDelivr 拉 ort 运行时，避免 blob: Worker 在 Safari 上 Load failed
+    wasm.wasmPaths =
+      "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.1/dist/";
+  } catch (_) {}
+}
+
+configureOnnxBackend();
 
 // 全程开启：刷新后再次 from_pretrained 时自动 Range 续传
 installResumableFetch();
@@ -598,6 +615,7 @@ function notify(onProgress, payload) {
 }
 
 async function loadModelOnDevice(device, onProgress, fromCache) {
+  configureOnnxBackend();
   const fp16 = device === "webgpu" ? await canFp16() : false;
   notify(onProgress, {
     status: "loading",
@@ -629,6 +647,14 @@ async function loadModelOnDevice(device, onProgress, fromCache) {
   });
 }
 
+function resetLoadPromises() {
+  processorPromise = null;
+  tokenizerPromise = null;
+  modelPromise = null;
+  warmed = false;
+  deviceUsed = null;
+}
+
 export async function loadCoach(onProgress, options) {
   const opts = options || {};
   const forceRemote = !!opts.forceRemote;
@@ -640,6 +666,11 @@ export async function loadCoach(onProgress, options) {
 
   let fromCache = false;
   const prevAllowRemote = env.allowRemoteModels;
+  configureOnnxBackend();
+  // 始终允许远程回落：Cache API 命中时 Transformers 仍会优先用缓存。
+  // 若强行 allowRemoteModels=false，缓存误判/键不一致时会直接失败并表现为 Load failed。
+  env.allowRemoteModels = true;
+
   const stopResumeListen = onResumeProgress(function (info) {
     if (!info) return;
     if (
@@ -668,19 +699,15 @@ export async function loadCoach(onProgress, options) {
     if (cached.ok) {
       fromCache = true;
       setModelHost(cached.host);
-      // 已下齐：禁止再走远程，强制走 Cache API
-      env.allowRemoteModels = false;
       notify(onProgress, {
         status: "loading",
         data: "本地已有模型，正在加载…",
         fromCache: true,
       });
     } else {
-      // 无完整缓存：探测可用源；探测失败时仍按优先级尝试下载
       notify(onProgress, { status: "loading", data: "选择可用模型源…" });
       let hostProbe = await probeModelHosts(onProgress);
       if (!hostProbe.ok) {
-        // 探测偶发失败时，仍按地区优先级硬试，避免误报「均不可用」
         const fallbackHost = isLikelyChinaNetwork()
           ? MIRROR_HOST
           : GLOBAL_HOST;
@@ -706,9 +733,8 @@ export async function loadCoach(onProgress, options) {
       data: fromCache ? "从本地加载处理器…" : "下载处理器…",
       fromCache: fromCache,
     });
-    processorPromise =
-      processorPromise ||
-      AutoProcessor.from_pretrained(MODEL_ID, {
+    if (!processorPromise) {
+      processorPromise = AutoProcessor.from_pretrained(MODEL_ID, {
         progress_callback: function (info) {
           notify(
             onProgress,
@@ -716,15 +742,15 @@ export async function loadCoach(onProgress, options) {
           );
         },
       });
+    }
 
     notify(onProgress, {
       status: "loading",
       data: fromCache ? "从本地加载分词器…" : "下载分词器…",
       fromCache: fromCache,
     });
-    tokenizerPromise =
-      tokenizerPromise ||
-      AutoTokenizer.from_pretrained(MODEL_ID, {
+    if (!tokenizerPromise) {
+      tokenizerPromise = AutoTokenizer.from_pretrained(MODEL_ID, {
         progress_callback: function (info) {
           notify(
             onProgress,
@@ -732,8 +758,10 @@ export async function loadCoach(onProgress, options) {
           );
         },
       });
+    }
 
-    const preferGpu = await canWebGPU();
+    // iPhone / iPad：WebGPU 常半残，直接走 WASM，减少 Load failed
+    const preferGpu = !isAppleMobileBrowser() && (await canWebGPU());
     if (!modelPromise) {
       if (preferGpu) {
         try {
@@ -742,7 +770,6 @@ export async function loadCoach(onProgress, options) {
           deviceUsed = "webgpu";
         } catch (gpuErr) {
           modelPromise = null;
-          // 本地缓存加载 WebGPU 失败时，允许再试 WASM（仍可走缓存）
           notify(onProgress, {
             status: "loading",
             data:
@@ -771,13 +798,18 @@ export async function loadCoach(onProgress, options) {
         data: "编译/预热模型…",
         fromCache: fromCache,
       });
-      const text_inputs = tokenizer("a");
-      const pixel_values = full([1, 3, 768, 768], 0.0);
-      await model.generate({
-        ...text_inputs,
-        pixel_values,
-        max_new_tokens: 1,
-      });
+      try {
+        const text_inputs = tokenizer("a");
+        const pixel_values = full([1, 3, 768, 768], 0.0);
+        await model.generate({
+          ...text_inputs,
+          pixel_values,
+          max_new_tokens: 1,
+        });
+      } catch (warmErr) {
+        // 预热失败不阻断：部分 iOS 上 dummy generate 会报错，但真实推理仍可用
+        console.warn("[doyen] model warm-up skipped", warmErr);
+      }
       warmed = true;
     }
 
@@ -796,31 +828,43 @@ export async function loadCoach(onProgress, options) {
       fromCache: fromCache,
     };
   } catch (err) {
-    // 若强制本地失败（缓存不完整），清标记并改为联网下载（只重试一次）
+    const rawMsg = (err && err.message) || String(err || "");
+    const isLoadFailed = /Load failed|importing a module script failed/i.test(
+      rawMsg
+    );
+
+    // 缓存路径失败：清标记后允许联网重试
     if (fromCache && !forceRemote) {
-      env.allowRemoteModels = true;
       clearModelReadyFlag();
-      processorPromise = null;
-      tokenizerPromise = null;
-      modelPromise = null;
-      warmed = false;
-      deviceUsed = null;
+      resetLoadPromises();
       notify(onProgress, {
         status: "loading",
-        data: "本地缓存不完整，改为联网下载…",
+        data: "本地缓存不可用，改为联网加载…",
       });
       return loadCoach(onProgress, { forceRemote: true });
     }
 
-    // 当前源下载失败时，自动换另一源再试一次（不永久改写偏好，避免忽略另一源缓存）
+    // Load failed：再强制 WASM 重试一次
+    if (isLoadFailed && !opts.retryWasm) {
+      clearModelReadyFlag();
+      resetLoadPromises();
+      configureOnnxBackend();
+      notify(onProgress, {
+        status: "loading",
+        data: "引擎启动失败，正在重试…",
+      });
+      return loadCoach(onProgress, {
+        forceRemote: true,
+        switchedHost: !!opts.switchedHost,
+        retryWasm: true,
+      });
+    }
+
+    // 当前源失败：换另一源再试一次
     if (!opts.switchedHost && !fromCache) {
       const cur = normalizeHost(env.remoteHost);
       const alt = isMirrorHost(cur) ? GLOBAL_HOST : MIRROR_HOST;
-      processorPromise = null;
-      tokenizerPromise = null;
-      modelPromise = null;
-      warmed = false;
-      deviceUsed = null;
+      resetLoadPromises();
       setModelHost(alt);
       notify(onProgress, {
         status: "loading",
@@ -829,15 +873,16 @@ export async function loadCoach(onProgress, options) {
       return loadCoach(onProgress, {
         forceRemote: true,
         switchedHost: true,
+        retryWasm: !!opts.retryWasm,
       });
     }
 
-    processorPromise = null;
-    tokenizerPromise = null;
-    modelPromise = null;
-    warmed = false;
-    deviceUsed = null;
-    const msg = (err && err.message) || "模型加载失败";
+    resetLoadPromises();
+    let msg = rawMsg || "模型加载失败";
+    if (isLoadFailed) {
+      msg =
+        "模型引擎启动失败（设备可能内存不足或网络受限），请关闭其他 App 后重试";
+    }
     throw new Error(msg);
   } finally {
     try {
