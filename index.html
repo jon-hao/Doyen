@@ -58,18 +58,14 @@
 
     #preview {
       position: absolute;
-      top: 50%;
-      left: 50%;
-      width: auto;
-      height: auto;
-      min-width: 100%;
-      min-height: 100%;
-      max-width: none;
-      max-height: none;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      border: 0;
       object-fit: cover;
       object-position: center center;
       background: #000;
-      transform: translate(-50%, -50%);
       transform-origin: center center;
       transition: none;
     }
@@ -871,35 +867,27 @@
       }
 
       function layoutVideos() {
-        const stageEl = document.getElementById("stage");
-        const sw = stageEl.clientWidth || window.innerWidth || 1;
-        const sh = stageEl.clientHeight || window.innerHeight || 1;
-        const vw = video.videoWidth;
-        const vh = video.videoHeight;
-        if (!vw || !vh) return;
-
-        // cover：短边撑满，再居中
-        const scale = Math.max(sw / vw, sh / vh);
-        const w = Math.ceil(vw * scale);
-        const h = Math.ceil(vh * scale);
-
-        video.style.top = "50%";
-        video.style.left = "50%";
-        video.style.width = w + "px";
-        video.style.height = h + "px";
-        video.style.minWidth = "0";
-        video.style.minHeight = "0";
+        // 始终 CSS cover 铺满舞台，清掉可能残留的内联宽高，避免切镜头黑边/压缩
+        video.style.top = "0";
+        video.style.left = "0";
+        video.style.right = "0";
+        video.style.bottom = "0";
+        video.style.width = "100%";
+        video.style.height = "100%";
+        video.style.minWidth = "100%";
+        video.style.minHeight = "100%";
         video.style.maxWidth = "none";
         video.style.maxHeight = "none";
-        video.style.objectFit = "fill";
+        video.style.objectFit = "cover";
+        video.style.objectPosition = "center center";
         updatePreviewTransform();
       }
 
       function updatePreviewTransform() {
-        const parts = ["translate(-50%, -50%)"];
+        const parts = [];
         if (facingMode === "user") parts.push("scaleX(-1)");
         if (digitalScale > 1.01) parts.push("scale(" + digitalScale + ")");
-        video.style.transform = parts.join(" ");
+        video.style.transform = parts.length ? parts.join(" ") : "none";
       }
 
       async function resumePreview() {
