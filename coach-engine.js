@@ -9,9 +9,20 @@ import {
   RawImage,
   full,
 } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.1/+esm";
+import {
+  installResumableFetch,
+  onResumeProgress,
+  clearResumePartials,
+  listResumePartials,
+} from "./resume-download.js?v=20260924-resume";
 
 env.allowLocalModels = false;
 env.useBrowserCache = true;
+
+// 全程开启：刷新后再次 from_pretrained 时自动 Range 续传
+installResumableFetch();
+
+export { clearResumePartials, listResumePartials };
 
 const MODEL_ID = "onnx-community/Florence-2-base-ft";
 const TRANSFORMERS_CACHE = "transformers-cache";
@@ -312,6 +323,22 @@ export async function loadCoach(onProgress, options) {
 
   let fromCache = false;
   const prevAllowRemote = env.allowRemoteModels;
+  const stopResumeListen = onResumeProgress(function (info) {
+    if (!info || info.status !== "resume") return;
+    const pct =
+      info.total > 0
+        ? Math.min(99, Math.round((info.loaded / info.total) * 100))
+        : 0;
+    notify(onProgress, {
+      status: "loading",
+      data:
+        "继续下载 " +
+        (info.file || "模型") +
+        (pct ? "（已完成 " + pct + "%）" : "…"),
+      resumed: true,
+      fromCache: false,
+    });
+  });
 
   try {
     let cached = { ok: false, host: null };
@@ -474,6 +501,9 @@ export async function loadCoach(onProgress, options) {
     const msg = (err && err.message) || "模型加载失败";
     throw new Error(msg);
   } finally {
+    try {
+      stopResumeListen();
+    } catch (_) {}
     env.allowRemoteModels = prevAllowRemote;
   }
 }

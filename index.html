@@ -1423,10 +1423,10 @@
             "本地已有视觉模型缓存，进入拍摄后点「辅助拍摄」将直接加载，无需再次下载。";
         } else if (!gpu.ok) {
           probeNote.textContent =
-            "无 WebGPU，辅助拍摄将尝试 WASM（首次下载大、偏慢）。建议桌面 Chrome。";
+            "无 WebGPU，辅助拍摄将尝试 WASM（首次下载大、偏慢）。下载中途刷新可自动续传。建议桌面 Chrome。";
         } else {
           probeNote.textContent =
-            "环境正常。进入拍摄后点「辅助拍摄」会首次下载视觉模型（约数百 MB）；下完后下次会走本地缓存。";
+            "环境正常。进入拍摄后点「辅助拍摄」会首次下载视觉模型（约数百 MB）；中途刷新可续传，下完后下次走本地缓存。";
         }
 
         probeStatus.textContent = "检测完成";
@@ -1449,6 +1449,20 @@
             delete window.__DOYEN_HF_HOST__;
           }
         } catch (_) {}
+
+        // 清除断点续传半成品
+        try {
+          const resumeMod = await import(coachAssetUrl("resume-download.js"));
+          if (resumeMod && resumeMod.clearResumePartials) {
+            await resumeMod.clearResumePartials();
+          }
+        } catch (_) {}
+
+        if (typeof indexedDB !== "undefined") {
+          try {
+            indexedDB.deleteDatabase("doyen-resume-v1");
+          } catch (_) {}
+        }
 
         if (typeof caches !== "undefined" && caches.keys) {
           tasks.push(
@@ -1492,6 +1506,7 @@
               "transformers-cache",
               "transformersjs-cache",
               "@huggingface/transformers",
+              "doyen-resume-v1",
             ].forEach(function (name) {
               tasks.push(
                 new Promise(function (resolve) {
@@ -1720,7 +1735,7 @@
           base = pathName + "/" + fileName;
         }
         // bust browser module cache after deploy
-        return base + "?v=20260924-progress";
+        return base + "?v=20260924-resume";
       }
 
       function setCoachProgress(text, percentOrNull) {
@@ -1923,7 +1938,7 @@
       function handleCoachProgress(msg) {
         if (!msg) return;
         const fromCache = !!msg.fromCache;
-        const verb = fromCache ? "加载" : "下载";
+        const verb = fromCache ? "加载" : msg.resumed ? "继续下载" : "下载";
 
         if (
           msg.status === "initiate" ||
@@ -1962,7 +1977,11 @@
         }
         if (msg.status === "loading" && msg.data) {
           // 已有总进度时，不要被 indeterminate 文案打断跳动
-          if (coachDownloadTracker) return;
+          if (coachDownloadTracker && !msg.resumed) return;
+          if (msg.resumed) {
+            setCoachIndeterminate(String(msg.data));
+            return;
+          }
           setCoachIndeterminate(String(msg.data));
         } else if (msg.status === "ready") {
           if (coachDownloadTracker) coachDownloadTracker.finish();
