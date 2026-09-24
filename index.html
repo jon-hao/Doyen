@@ -1223,12 +1223,28 @@
       async function checkModelHosts() {
         try {
           const engine = await import(coachAssetUrl("coach-engine.js"));
+          // 本地已下齐 → 不依赖外网模型源
+          if (engine.findCachedModelHost) {
+            const cached = await engine.findCachedModelHost();
+            if (cached && cached.ok) {
+              if (engine.setModelHost) engine.setModelHost(cached.host);
+              return {
+                ok: true,
+                detail:
+                  "本地已缓存 · " +
+                  String(cached.host).replace(/^https?:\/\//, ""),
+                host: cached.host,
+                fromCache: true,
+              };
+            }
+          }
           const probed = await engine.probeModelHosts();
           if (probed.ok) {
             return {
               ok: true,
               detail: probed.host.replace(/^https?:\/\//, ""),
               host: probed.host,
+              fromCache: false,
             };
           }
           const parts = (probed.results || []).map(function (r) {
@@ -1240,12 +1256,14 @@
             ok: false,
             detail: parts.length ? parts.join("；") : "均失败",
             host: null,
+            fromCache: false,
           };
         } catch (err) {
           return {
             ok: false,
             detail: (err && err.message) || "检测失败",
             host: null,
+            fromCache: false,
           };
         }
       }
@@ -1338,15 +1356,19 @@
         probeStatus.textContent = "检测模型源（Hugging Face / hf-mirror）…";
         const mirror = await checkModelHosts();
 
-        // 辅助拍摄：CDN + 任一模型源
+        // 辅助拍摄：CDN +（本地缓存 或 任一模型源）
         const assistOk = tf.ok && mirror.ok;
         const assistDetail = !tf.ok
           ? "引擎不可用：" + tf.detail
           : !mirror.ok
             ? "模型源不可用：" + mirror.detail
-            : gpu.ok
-              ? "可用（WebGPU · " + mirror.detail + "）"
-              : "可用（WASM · " + mirror.detail + "）";
+            : mirror.fromCache
+              ? "可用（本地缓存 · " +
+                (gpu.ok ? "WebGPU" : "WASM") +
+                "）"
+              : gpu.ok
+                ? "可用（WebGPU · " + mirror.detail + "）"
+                : "可用（WASM · " + mirror.detail + "）";
 
         const shootOk = httpsOk && camera.ok;
 
@@ -1396,12 +1418,15 @@
         } else if (!assistOk) {
           probeNote.textContent =
             "当前环境无法使用「辅助拍摄」。拍照仍可进入。可点「重新检测」，或换网络 / 桌面 Chrome 后再试。";
+        } else if (mirror.fromCache) {
+          probeNote.textContent =
+            "本地已有视觉模型缓存，进入拍摄后点「辅助拍摄」将直接加载，无需再次下载。";
         } else if (!gpu.ok) {
           probeNote.textContent =
             "无 WebGPU，辅助拍摄将尝试 WASM（首次下载大、偏慢）。建议桌面 Chrome。";
         } else {
           probeNote.textContent =
-            "环境正常。进入拍摄后点「辅助拍摄」会首次下载视觉模型（约数百 MB）。";
+            "环境正常。进入拍摄后点「辅助拍摄」会首次下载视觉模型（约数百 MB）；下完后下次会走本地缓存。";
         }
 
         probeStatus.textContent = "检测完成";
@@ -1417,6 +1442,7 @@
 
         try {
           localStorage.removeItem("doyen_hf_host");
+          localStorage.removeItem("doyen_model_ready");
         } catch (_) {}
         try {
           if (typeof window !== "undefined") {
@@ -1686,11 +1712,15 @@
 
       function coachAssetUrl(fileName) {
         const pathName = location.pathname || "/";
-        if (pathName.endsWith("/")) return pathName + fileName;
-        if (/\.html?$/i.test(pathName)) {
-          return pathName.replace(/[^/]+$/, fileName);
+        let base;
+        if (pathName.endsWith("/")) base = pathName + fileName;
+        else if (/\.html?$/i.test(pathName)) {
+          base = pathName.replace(/[^/]+$/, fileName);
+        } else {
+          base = pathName + "/" + fileName;
         }
-        return pathName + "/" + fileName;
+        // bust browser module cache after deploy
+        return base + "?v=20260924-cache";
       }
 
       function setCoachProgress(text, percentOrNull) {
@@ -1766,9 +1796,11 @@
 
       function handleCoachProgress(msg) {
         if (!msg) return;
+        const fromCache = !!msg.fromCache;
+        const verb = fromCache ? "加载" : "下载";
         if (msg.status === "progress_total" && msg.progress != null) {
           setCoachProgress(
-            "下载模型 " + Number(msg.progress).toFixed(0) + "%",
+            verb + "模型 " + Number(msg.progress).toFixed(0) + "%",
             Number(msg.progress)
           );
           return;
@@ -1776,7 +1808,7 @@
         if (msg.status === "progress" && msg.progress != null) {
           const file = msg.file ? String(msg.file).split("/").pop() : "文件";
           setCoachProgress(
-            "下载 " + file + " " + Number(msg.progress).toFixed(0) + "%",
+            verb + " " + file + " " + Number(msg.progress).toFixed(0) + "%",
             Number(msg.progress)
           );
           return;
@@ -1784,7 +1816,10 @@
         if (msg.status === "loading" && msg.data) {
           setCoachIndeterminate(String(msg.data));
         } else if (msg.status === "ready") {
-          setCoachProgress("模型就绪", 100);
+          setCoachProgress(
+            fromCache ? "本地模型就绪" : "模型就绪",
+            100
+          );
         }
       }
 
