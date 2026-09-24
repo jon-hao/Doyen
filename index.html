@@ -1553,12 +1553,16 @@
       let coachDetectGen = 0;
 
       function coachAssetUrl(fileName) {
-        // jsDelivr 更新比 GitHub Pages 更快，避免发布后仍加载旧 Florence 引擎
-        return (
-          "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/" +
-          fileName +
-          "?v=20260924-lite2"
-        );
+        const pathName = location.pathname || "/";
+        let base;
+        if (pathName.endsWith("/")) base = pathName + fileName;
+        else if (/\.html?$/i.test(pathName)) {
+          base = pathName.replace(/[^/]+$/, fileName);
+        } else {
+          base = pathName + "/" + fileName;
+        }
+        // 同域优先；jsDelivr 作备用（Pages 延迟时）
+        return base + "?v=20260924-req1";
       }
 
       function setCoachHint(text) {
@@ -1701,8 +1705,15 @@
 
       async function ensureCoachEngine() {
         if (coachEngine) return coachEngine;
-        coachEngine = await import(coachAssetUrl("coach-engine.js"));
-        return coachEngine;
+        try {
+          coachEngine = await import(coachAssetUrl("coach-engine.js"));
+          return coachEngine;
+        } catch (_) {
+          coachEngine = await import(
+            "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/coach-engine.js?v=20260924-req1"
+          );
+          return coachEngine;
+        }
       }
 
       async function ensureCoachModelLoaded() {
@@ -1729,23 +1740,13 @@
             }
           } catch (_) {}
 
+          // 仅「未成功加载过」时显示下载进度；已就绪静默加载，不打扰
           if (fromCacheLikely) {
             setCoachBtnProgress(0);
             setCoachHint("");
           } else {
-            let startPct = 0;
-            try {
-              if (engine.estimateResumeProgress) {
-                const est = await engine.estimateResumeProgress();
-                if (est && est.files > 0 && est.pct > 0) startPct = est.pct;
-              }
-            } catch (_) {}
-            setCoachBtnProgress(startPct);
-            setCoachHint(
-              startPct > 0
-                ? "下载资源 " + Number(startPct).toFixed(0) + "%"
-                : "下载资源 0%"
-            );
+            setCoachBtnProgress(0);
+            setCoachHint("下载资源 0%");
           }
 
           await engine.loadCoach(handleCoachProgress);

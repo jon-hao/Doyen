@@ -41,6 +41,54 @@ function modelCandidateUrls() {
   ];
 }
 
+async function fetchWithProgress(url, onProgress, label, rangeStart, rangeEnd) {
+  const start = typeof rangeStart === "number" ? rangeStart : 0;
+  const end = typeof rangeEnd === "number" ? rangeEnd : 1;
+  const span = Math.max(0.01, end - start);
+
+  function report(loadedPart, totalPart) {
+    const ratio = totalPart > 0 ? loadedPart / totalPart : 1;
+    const overall = start + Math.min(1, Math.max(0, ratio)) * span;
+    notify(onProgress, {
+      status: "progress",
+      file: label,
+      loaded: Math.round(MODEL_BYTES * overall),
+      total: MODEL_BYTES,
+    });
+  }
+
+  const res = await fetch(url, { cache: "force-cache" });
+  if (!res.ok) throw new Error("下载失败 HTTP " + res.status);
+
+  const totalHeader = parseInt(res.headers.get("Content-Length") || "0", 10);
+  const total = totalHeader > 0 ? totalHeader : MODEL_BYTES;
+
+  if (!res.body || !res.body.getReader) {
+    const buf = new Uint8Array(await res.arrayBuffer());
+    report(buf.byteLength, buf.byteLength);
+    return buf;
+  }
+
+  const reader = res.body.getReader();
+  const chunks = [];
+  let loaded = 0;
+  for (;;) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    chunks.push(chunk.value);
+    loaded += chunk.value.byteLength || 0;
+    report(loaded, total);
+  }
+  const out = new Uint8Array(loaded);
+  let offset = 0;
+  for (let i = 0; i < chunks.length; i++) {
+    out.set(chunks[i], offset);
+    offset += chunks[i].byteLength;
+  }
+  report(out.byteLength, out.byteLength);
+  return out;
+}
+
 async function fetchModelBuffer(onProgress) {
   const urls = modelCandidateUrls();
   let lastErr = null;
@@ -49,7 +97,9 @@ async function fetchModelBuffer(onProgress) {
       return await fetchWithProgress(
         urls[i],
         onProgress,
-        "efficientdet_lite0.tflite"
+        "efficientdet_lite0.tflite",
+        0.15,
+        0.9
       );
     } catch (err) {
       lastErr = err;
@@ -112,19 +162,9 @@ export function probeModelHosts() {
   });
 }
 export async function findCachedModelHost() {
+  // 仅：内存已就绪，或本机曾经成功加载过（避免 HEAD 探测误判成「已下载」而不显示进度）
   if (detector && warmed) return { ok: true, host: "local" };
-  const flag = readModelReadyFlag();
-  if (flag) return { ok: true, host: "local" };
-  // 同域模型文件视为「可本地加载」；是否已在 Cache 里由浏览器决定
-  try {
-    const urls = modelCandidateUrls();
-    for (let i = 0; i < urls.length; i++) {
-      try {
-        const res = await fetch(urls[i], { method: "HEAD", cache: "force-cache" });
-        if (res && res.ok) return { ok: true, host: "local" };
-      } catch (_) {}
-    }
-  } catch (_) {}
+  if (readModelReadyFlag()) return { ok: true, host: "local" };
   return { ok: false, host: null };
 }
 
@@ -155,76 +195,36 @@ export function getCoachDevice() {
   return deviceUsed;
 }
 
-async function fetchWithProgress(url, onProgress, label) {
-  const res = await fetch(url, { cache: "force-cache" });
-  if (!res.ok) throw new Error("下载失败 HTTP " + res.status);
-
-  const totalHeader = parseInt(res.headers.get("Content-Length") || "0", 10);
-  const total = totalHeader > 0 ? totalHeader : MODEL_BYTES;
-
-  if (!res.body || !res.body.getReader) {
-    const buf = new Uint8Array(await res.arrayBuffer());
-    notify(onProgress, {
-      status: "progress",
-      file: label,
-      loaded: buf.byteLength,
-      total: buf.byteLength,
-    });
-    return buf;
-  }
-
-  const reader = res.body.getReader();
-  const chunks = [];
-  let loaded = 0;
-  for (;;) {
-    const chunk = await reader.read();
-    if (chunk.done) break;
-    chunks.push(chunk.value);
-    loaded += chunk.value.byteLength || 0;
-    notify(onProgress, {
-      status: "progress",
-      file: label,
-      loaded: loaded,
-      total: total,
-    });
-  }
-  const out = new Uint8Array(loaded);
-  let offset = 0;
-  for (let i = 0; i < chunks.length; i++) {
-    out.set(chunks[i], offset);
-    offset += chunks[i].byteLength;
-  }
+function emitResourceProgress(onProgress, fraction) {
+  const pct = Math.max(0, Math.min(0.99, Number(fraction) || 0));
   notify(onProgress, {
-    status: "done",
-    file: label,
-    loaded: out.byteLength,
-    total: out.byteLength,
+    status: "progress",
+    file: "efficientdet_lite0.tflite",
+    loaded: Math.round(MODEL_BYTES * pct),
+    total: MODEL_BYTES,
   });
-  return out;
 }
 
 async function createDetector(onProgress) {
-  notify(onProgress, { status: "loading", data: "加载检测运行时…" });
   notify(onProgress, {
     status: "initiate",
     file: "efficientdet_lite0.tflite",
     total: MODEL_BYTES,
   });
-
-  const vision = await FilesetResolver.forVisionTasks(WASM_CDN);
-
-  notify(onProgress, { status: "loading", data: "下载轻量检测模型…" });
   notify(onProgress, {
     status: "download",
     file: "efficientdet_lite0.tflite",
     total: MODEL_BYTES,
   });
+  emitResourceProgress(onProgress, 0.02);
+
+  // 运行时 WASM（计入资源下载进度，避免长时间停在 0%）
+  const vision = await FilesetResolver.forVisionTasks(WASM_CDN);
+  emitResourceProgress(onProgress, 0.15);
 
   const modelBuffer = await fetchModelBuffer(onProgress);
+  emitResourceProgress(onProgress, 0.92);
 
-  notify(onProgress, { status: "loading", data: "初始化检测器…" });
-
-  // iOS 优先 CPU，避开 WebGL/GPU 兼容坑；内存占用仍远低于 Florence
   let created;
   try {
     created = await ObjectDetector.createFromOptions(vision, {
@@ -232,24 +232,31 @@ async function createDetector(onProgress) {
         modelAssetBuffer: modelBuffer,
         delegate: "CPU",
       },
-      scoreThreshold: 0.35,
-      maxResults: 10,
+      scoreThreshold: 0.28,
+      maxResults: 8,
       runningMode: "IMAGE",
     });
     deviceUsed = "wasm";
-  } catch (cpuErr) {
+  } catch (_) {
     created = await ObjectDetector.createFromOptions(vision, {
       baseOptions: {
         modelAssetBuffer: modelBuffer,
         delegate: "GPU",
       },
-      scoreThreshold: 0.35,
-      maxResults: 10,
+      scoreThreshold: 0.28,
+      maxResults: 8,
       runningMode: "IMAGE",
     });
     deviceUsed = "webgl";
   }
 
+  emitResourceProgress(onProgress, 0.99);
+  notify(onProgress, {
+    status: "done",
+    file: "efficientdet_lite0.tflite",
+    loaded: MODEL_BYTES,
+    total: MODEL_BYTES,
+  });
   return created;
 }
 
