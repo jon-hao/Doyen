@@ -52,22 +52,31 @@
     #stage {
       position: absolute;
       inset: 0;
+      width: 100%;
+      height: 100%;
       overflow: hidden;
       background: #000;
     }
 
+    /* iOS Safari 对 video + object-fit:cover 不可靠：尺寸交给 JS 算 cover */
     #preview {
       position: absolute;
-      inset: 0;
-      width: 100%;
-      height: 100%;
+      top: 0;
+      left: 0;
+      display: block;
       margin: 0;
+      padding: 0;
       border: 0;
-      object-fit: cover;
-      object-position: center center;
       background: #000;
       transform-origin: center center;
       transition: none;
+      /* 元数据未到前先铺满，避免 300×150 默认小窗 */
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      object-position: center center;
+      -webkit-backface-visibility: hidden;
+      backface-visibility: hidden;
     }
 
 
@@ -467,7 +476,14 @@
 <body>
   <div id="app">
     <div id="stage">
-      <video id="preview" playsinline autoplay muted></video>
+      <video
+        id="preview"
+        playsinline
+        webkit-playsinline
+        autoplay
+        muted
+        disablepictureinpicture
+      ></video>
       <canvas id="subjectOverlay"></canvas>
     </div>
     <canvas id="shot"></canvas>
@@ -742,18 +758,55 @@
       }
 
       function layoutVideos() {
-        // 始终 CSS cover 铺满舞台，清掉可能残留的内联宽高，避免切镜头黑边/压缩
-        video.style.top = "0";
-        video.style.left = "0";
-        video.style.right = "0";
-        video.style.bottom = "0";
-        video.style.width = "100%";
-        video.style.height = "100%";
-        video.style.minWidth = "100%";
-        video.style.minHeight = "100%";
+        const stageEl = document.getElementById("stage");
+        const sw = Math.max(
+          1,
+          (stageEl && stageEl.clientWidth) || window.innerWidth || 1
+        );
+        const sh = Math.max(
+          1,
+          (stageEl && stageEl.clientHeight) ||
+            window.innerHeight ||
+            (window.visualViewport && window.visualViewport.height) ||
+            1
+        );
+        const vw = video.videoWidth;
+        const vh = video.videoHeight;
+
+        video.style.position = "absolute";
+        video.style.margin = "0";
+        video.style.padding = "0";
+        video.style.border = "0";
         video.style.maxWidth = "none";
         video.style.maxHeight = "none";
-        video.style.objectFit = "cover";
+        video.style.minWidth = "0";
+        video.style.minHeight = "0";
+        video.style.right = "auto";
+        video.style.bottom = "auto";
+        video.style.zIndex = "0";
+
+        if (!vw || !vh) {
+          // 尚未拿到帧尺寸：先用 CSS cover 撑满，避免默认小窗黑框
+          video.style.top = "0";
+          video.style.left = "0";
+          video.style.width = sw + "px";
+          video.style.height = sh + "px";
+          video.style.objectFit = "cover";
+          video.style.objectPosition = "center center";
+          updatePreviewTransform();
+          return;
+        }
+
+        // 按视频真实宽高比做 cover：短边撑满，居中裁切（不依赖 object-fit）
+        const scale = Math.max(sw / vw, sh / vh);
+        const w = Math.ceil(vw * scale);
+        const h = Math.ceil(vh * scale);
+        video.style.top = Math.floor((sh - h) / 2) + "px";
+        video.style.left = Math.floor((sw - w) / 2) + "px";
+        video.style.width = w + "px";
+        video.style.height = h + "px";
+        // 元素框已与画面同比例，fill 只是铺满该框，不会变形
+        video.style.objectFit = "fill";
         video.style.objectPosition = "center center";
         updatePreviewTransform();
       }
@@ -762,7 +815,16 @@
         const parts = [];
         if (facingMode === "user") parts.push("scaleX(-1)");
         if (digitalScale > 1.01) parts.push("scale(" + digitalScale + ")");
+        video.style.transformOrigin = "center center";
         video.style.transform = parts.length ? parts.join(" ") : "none";
+      }
+
+      function scheduleLayoutVideos() {
+        layoutVideos();
+        requestAnimationFrame(function () {
+          layoutVideos();
+          requestAnimationFrame(layoutVideos);
+        });
       }
 
       async function resumePreview() {
@@ -770,10 +832,7 @@
         try {
           await video.play();
         } catch (_) {}
-        requestAnimationFrame(function () {
-          layoutVideos();
-          requestAnimationFrame(layoutVideos);
-        });
+        scheduleLayoutVideos();
       }
 
       function updateZoomButtons() {
@@ -793,13 +852,21 @@
       }
 
       function onVideoGeometry() {
-        layoutVideos();
+        scheduleLayoutVideos();
       }
 
       video.addEventListener("loadedmetadata", onVideoGeometry);
       video.addEventListener("loadeddata", onVideoGeometry);
       video.addEventListener("playing", onVideoGeometry);
       video.addEventListener("resize", onVideoGeometry);
+      if (typeof ResizeObserver !== "undefined") {
+        const stageEl = document.getElementById("stage");
+        if (stageEl) {
+          new ResizeObserver(function () {
+            scheduleLayoutVideos();
+          }).observe(stageEl);
+        }
+      }
 
       async function openStream(constraints) {
         return navigator.mediaDevices.getUserMedia(constraints);
@@ -831,14 +898,10 @@
         const prev = stream;
         stream = next;
         video.srcObject = stream;
-        layoutVideos();
+        scheduleLayoutVideos();
         try {
           await video.play();
-          layoutVideos();
-          requestAnimationFrame(function () {
-            layoutVideos();
-            requestAnimationFrame(layoutVideos);
-          });
+          scheduleLayoutVideos();
         } catch (err) {
           next.getTracks().forEach(function (t) { t.stop(); });
           stream = prev;
@@ -1486,7 +1549,7 @@
         } else {
           base = pathName + "/" + fileName;
         }
-        return base + "?v=20260924-hintfix";
+        return base + "?v=20260924-fullscreen3";
       }
 
       function setCoachHint(text) {
@@ -1900,12 +1963,16 @@
         }
       });
       window.addEventListener("resize", function () {
-        layoutVideos();
+        scheduleLayoutVideos();
         if (coachActive) sizeSubjectOverlay();
       });
       window.addEventListener("orientationchange", function () {
-        setTimeout(layoutVideos, 120);
+        setTimeout(scheduleLayoutVideos, 120);
+        setTimeout(scheduleLayoutVideos, 400);
       });
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener("resize", scheduleLayoutVideos);
+      }
 
       // 先进检测页，再进入拍摄
       runDeviceProbe();
