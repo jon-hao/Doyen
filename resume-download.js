@@ -240,11 +240,98 @@ function parseContentRangeTotal(header) {
 function fileNameFromUrl(url) {
   try {
     const u = new URL(url);
+    const m = /\/resolve\/[^/]+\/(.+)$/i.exec(u.pathname);
+    if (m && m[1]) return decodeURIComponent(m[1]);
     const parts = u.pathname.split("/");
     return parts[parts.length - 1] || "file";
   } catch (_) {
     return "file";
   }
+}
+
+function notifyByteProgress(url, loaded, total, status) {
+  notifyResume({
+    url: url,
+    file: fileNameFromUrl(url),
+    loaded: loaded,
+    total: total || 0,
+    status: status || "progress",
+  });
+}
+
+/**
+ * 旁路 tee：一边给 Transformers 读（保留原始 Response/进度），一边写入 IDB 以便中断续传。
+ */
+function persistSideStream(url, stream, total, etag, contentType) {
+  let savedBlob = new Blob();
+  let pending = [];
+  let pendingSize = 0;
+  let loaded = 0;
+  let persistChain = Promise.resolve();
+  let lastNotify = 0;
+
+  function flushPending(force) {
+    if (!pending.length) return persistChain;
+    if (!force && pendingSize < PERSIST_EVERY) return persistChain;
+    const chunkBlob = new Blob(pending);
+    pending = [];
+    pendingSize = 0;
+    savedBlob = new Blob([savedBlob, chunkBlob]);
+    const snapshot = savedBlob;
+    const sizeNow = snapshot.size;
+    persistChain = persistChain
+      .then(function () {
+        return putPartial({
+          url: url,
+          etag: etag || "",
+          total: total || 0,
+          blob: snapshot,
+          updatedAt: Date.now(),
+        });
+      })
+      .then(function () {
+        notifyByteProgress(url, sizeNow, total, "persist");
+      })
+      .catch(function () {});
+    return persistChain;
+  }
+
+  activeDownloads.set(url, {
+    flush: function () {
+      return flushPending(true);
+    },
+  });
+
+  (async function () {
+    try {
+      const reader = stream.getReader();
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        const value = chunk.value;
+        pending.push(value);
+        const n = value.byteLength || value.length || 0;
+        pendingSize += n;
+        loaded += n;
+        if (loaded - lastNotify >= PERSIST_EVERY || !lastNotify) {
+          lastNotify = loaded;
+          notifyByteProgress(url, loaded, total, "progress");
+        }
+        if (pendingSize >= PERSIST_EVERY) {
+          await flushPending(false);
+        }
+      }
+      await flushPending(true);
+      await deletePartial(url);
+      notifyByteProgress(url, total || loaded, total || loaded, "done");
+    } catch (_) {
+      try {
+        await flushPending(true);
+      } catch (_) {}
+    } finally {
+      activeDownloads.delete(url);
+    }
+  })();
 }
 
 /**
@@ -334,8 +421,10 @@ function wrapResumableResponse(url, networkRes, start, partialBlob, meta) {
             const value = chunk.value;
             controller.enqueue(value);
             pending.push(value);
-            pendingSize += value.byteLength || value.length || 0;
-            loaded += value.byteLength || value.length || 0;
+            const n = value.byteLength || value.length || 0;
+            pendingSize += n;
+            loaded += n;
+            notifyByteProgress(url, loaded, total, "progress");
             if (pendingSize >= PERSIST_EVERY) {
               await flushPending(false);
             }
@@ -440,16 +529,37 @@ async function resumableFetch(url, init, fetchImpl) {
     return fetchImpl(url, init);
   }
 
-  if (start > 0) {
-    notifyResume({
-      url: url,
-      file: fileNameFromUrl(url),
-      loaded: start,
-      total: total,
-      resumed: true,
-      status: "resume",
-    });
+  // 全新下载：tee 旁路落盘，把原始 Response 交给 Transformers，避免进度一直 0% / iOS Load failed
+  if (start === 0) {
+    if (
+      networkRes.status === 200 &&
+      total >= MIN_RESUME_BYTES &&
+      networkRes.body &&
+      typeof networkRes.body.tee === "function"
+    ) {
+      try {
+        const sides = networkRes.body.tee();
+        persistSideStream(url, sides[1], total, etag, contentType);
+        return new Response(sides[0], {
+          status: networkRes.status,
+          statusText: networkRes.statusText,
+          headers: networkRes.headers,
+        });
+      } catch (_) {
+        return networkRes;
+      }
+    }
+    return networkRes;
   }
+
+  notifyResume({
+    url: url,
+    file: fileNameFromUrl(url),
+    loaded: start,
+    total: total,
+    resumed: true,
+    status: "resume",
+  });
 
   return wrapResumableResponse(url, networkRes, start, partial && partial.blob, {
     total: total,

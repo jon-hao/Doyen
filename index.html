@@ -403,7 +403,7 @@
       justify-self: start;
       display: flex;
       flex-direction: column;
-      align-items: flex-start;
+      align-items: center;
       gap: 4px;
       max-width: 110px;
     }
@@ -457,11 +457,12 @@
     #coachHint {
       margin: 0;
       min-height: 14px;
+      width: 100%;
       max-width: 108px;
       font-size: 10px;
       line-height: 1.25;
       color: rgba(255, 255, 255, 0.55);
-      text-align: left;
+      text-align: center;
     }
 
     #subjectOverlay {
@@ -1568,7 +1569,7 @@
         } else {
           base = pathName + "/" + fileName;
         }
-        return base + "?v=20260924-cover-tf1";
+        return base + "?v=20260924-dlfix1";
       }
 
       function setCoachHint(text) {
@@ -1598,8 +1599,22 @@
         let peakPct = 0;
         let activeFile = "";
 
+        function normalizeFileKey(file) {
+          let f = String(file || "").split("?")[0];
+          if (!f) return "file";
+          if (knownTotals[f]) return f;
+          const base = f.split("/").pop();
+          const keys = Object.keys(knownTotals);
+          for (let i = 0; i < keys.length; i++) {
+            const key = keys[i];
+            if (key === base || key.endsWith("/" + base)) return key;
+          }
+          if (base && /\.onnx$/i.test(base)) return "onnx/" + base;
+          return f;
+        }
+
         function ensureFile(file) {
-          const key = String(file || "file");
+          const key = normalizeFileKey(file);
           if (!files[key]) {
             files[key] = {
               loaded: 0,
@@ -1607,8 +1622,19 @@
               done: false,
             };
           }
-          return files[key];
+          return { key: key, entry: files[key] };
         }
+
+        // 预登记本项目实际会拉的文件，百分比按整包体积涨
+        [
+          "tokenizer.json",
+          "onnx/decoder_model_merged_q4.onnx",
+          "onnx/encoder_model_q4.onnx",
+          "onnx/embed_tokens_fp16.onnx",
+          "onnx/vision_encoder_fp16.onnx",
+        ].forEach(function (key) {
+          ensureFile(key);
+        });
 
         function compute() {
           let loaded = 0;
@@ -1627,9 +1653,12 @@
 
         return {
           onEvent: function (msg) {
-            if (!msg || !msg.file) return null;
-            const file = String(msg.file);
-            const entry = ensureFile(file);
+            if (!msg) return null;
+            const rawFile = msg.file || msg.name;
+            if (!rawFile) return null;
+            const got = ensureFile(rawFile);
+            const file = got.key;
+            const entry = got.entry;
             if (msg.status === "initiate" || msg.status === "download") {
               activeFile = file;
               if (typeof msg.total === "number" && msg.total > 0) {
@@ -1743,10 +1772,16 @@
           } catch (_) {}
           setCoachBtnProgress(0);
           setCoachHint("");
-          const msg = (err && err.message) || "资源加载失败";
+          const raw = (err && err.message) || "";
           const paused =
             (err && err.name === "AbortError") ||
-            /abort|network|Failed to fetch|interrupted|中断/i.test(msg);
+            /abort|interrupted|中断/i.test(raw);
+          let msg = raw || "资源加载失败";
+          if (/Load failed/i.test(raw)) {
+            msg = "模型引擎加载失败，请强刷后重试";
+          } else if (/Failed to fetch|NetworkError|network/i.test(raw)) {
+            msg = "网络中断，再次点击可继续下载";
+          }
           showToast(paused ? "下载已暂停，再次点击可继续" : msg, "err");
           return false;
         } finally {

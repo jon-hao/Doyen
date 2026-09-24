@@ -17,10 +17,18 @@ import {
   hasIncompleteDownloads,
   estimateResumeProgress,
   flushActiveDownloads,
-} from "./resume-download.js?v=20260924-hintfix";
+} from "./resume-download.js?v=20260924-dlfix1";
 
 env.allowLocalModels = false;
 env.useBrowserCache = true;
+
+// iOS Safari：多线程 / proxy Worker 常直接 “Load failed”
+try {
+  if (env.backends && env.backends.onnx && env.backends.onnx.wasm) {
+    env.backends.onnx.wasm.numThreads = 1;
+    env.backends.onnx.wasm.proxy = false;
+  }
+} catch (_) {}
 
 // 全程开启：刷新后再次 from_pretrained 时自动 Range 续传
 installResumableFetch();
@@ -624,20 +632,21 @@ export async function loadCoach(onProgress, options) {
   let fromCache = false;
   const prevAllowRemote = env.allowRemoteModels;
   const stopResumeListen = onResumeProgress(function (info) {
-    if (!info || info.status !== "resume") return;
-    const pct =
-      info.total > 0
-        ? Math.min(99, Math.round((info.loaded / info.total) * 100))
-        : 0;
-    notify(onProgress, {
-      status: "loading",
-      data:
-        "继续下载 " +
-        (info.file || "模型") +
-        (pct ? "（已完成 " + pct + "%）" : "…"),
-      resumed: true,
-      fromCache: false,
-    });
+    if (!info) return;
+    if (
+      info.status === "progress" ||
+      info.status === "persist" ||
+      info.status === "resume" ||
+      info.status === "done"
+    ) {
+      notify(onProgress, {
+        status: info.status === "done" ? "done" : "progress",
+        file: info.file,
+        loaded: info.loaded,
+        total: info.total,
+        channel: "resume-progress",
+      });
+    }
   });
 
   try {
