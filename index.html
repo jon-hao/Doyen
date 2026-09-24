@@ -956,10 +956,14 @@
         const prev = stream;
         stream = next;
         video.srcObject = stream;
+        layoutVideos();
         try {
           await video.play();
           layoutVideos();
-          requestAnimationFrame(layoutVideos);
+          requestAnimationFrame(function () {
+            layoutVideos();
+            requestAnimationFrame(layoutVideos);
+          });
         } catch (err) {
           next.getTracks().forEach(function (t) { t.stop(); });
           stream = prev;
