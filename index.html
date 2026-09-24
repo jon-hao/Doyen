@@ -1794,10 +1794,165 @@
         showCoachPanel();
       }
 
+      function createCoachDownloadTracker() {
+        // 预置已知体积，避免每开一个大文件总进度回跳
+        const knownTotals = {
+          "config.json": 5432,
+          "tokenizer.json": 2297961,
+          "tokenizer_config.json": 197658,
+          "preprocessor_config.json": 2673,
+          "generation_config.json": 4096,
+          "onnx/decoder_model_merged_q4.onnx": 64393474,
+          "onnx/encoder_model_q4.onnx": 30058778,
+          "onnx/embed_tokens_fp16.onnx": 78780290,
+          "onnx/embed_tokens.onnx": 157560044,
+          "onnx/vision_encoder_fp16.onnx": 183930536,
+          "onnx/vision_encoder.onnx": 366549825,
+        };
+        const files = Object.create(null);
+        let peakPct = 0;
+        let activeFile = "";
+
+        function ensureFile(file) {
+          const key = String(file || "file");
+          if (!files[key]) {
+            files[key] = {
+              loaded: 0,
+              total: knownTotals[key] || 0,
+              done: false,
+            };
+          }
+          return files[key];
+        }
+
+        function fileLabel(file) {
+          const name = String(file || "").split("/").pop() || "文件";
+          if (name.length > 22) return name.slice(0, 10) + "…" + name.slice(-8);
+          return name;
+        }
+
+        function compute() {
+          let loaded = 0;
+          let total = 0;
+          let seen = 0;
+          Object.keys(files).forEach(function (key) {
+            const f = files[key];
+            seen += 1;
+            const t = f.total > 0 ? f.total : f.done ? Math.max(f.loaded, 1) : 0;
+            const l = f.done ? t || f.loaded : Math.min(f.loaded, t || f.loaded);
+            loaded += l;
+            total += t;
+          });
+          let pct = 0;
+          if (total > 0) pct = (loaded / total) * 100;
+          else if (seen > 0) {
+            // 尚无体积信息时，按已完成文件数估一个很粗的进度
+            const doneCount = Object.keys(files).filter(function (k) {
+              return files[k].done;
+            }).length;
+            pct = (doneCount / Math.max(seen, 1)) * 100;
+          }
+          // 单调递增，避免新文件加入后百分比回退
+          if (pct > peakPct) peakPct = pct;
+          return {
+            pct: peakPct,
+            loaded: loaded,
+            total: total,
+            activeFile: activeFile,
+          };
+        }
+
+        return {
+          onEvent: function (msg) {
+            if (!msg || !msg.file) return null;
+            const file = String(msg.file);
+            const entry = ensureFile(file);
+            if (msg.status === "initiate" || msg.status === "download") {
+              activeFile = file;
+              if (typeof msg.total === "number" && msg.total > 0) {
+                entry.total = Math.max(entry.total, msg.total);
+              }
+            } else if (msg.status === "progress") {
+              activeFile = file;
+              if (typeof msg.total === "number" && msg.total > 0) {
+                entry.total = Math.max(entry.total, msg.total);
+              }
+              if (typeof msg.loaded === "number" && msg.loaded >= 0) {
+                entry.loaded = Math.max(entry.loaded, msg.loaded);
+              } else if (typeof msg.progress === "number" && entry.total > 0) {
+                entry.loaded = Math.max(
+                  entry.loaded,
+                  (Number(msg.progress) / 100) * entry.total
+                );
+              }
+            } else if (msg.status === "done") {
+              entry.done = true;
+              if (entry.total > 0) entry.loaded = entry.total;
+              else if (entry.loaded > 0) entry.total = entry.loaded;
+              else {
+                entry.loaded = 1;
+                entry.total = 1;
+              }
+            } else {
+              return null;
+            }
+            const snap = compute();
+            return {
+              pct: snap.pct,
+              label: fileLabel(snap.activeFile || file),
+              loaded: snap.loaded,
+              total: snap.total,
+            };
+          },
+          finish: function () {
+            peakPct = 100;
+            return { pct: 100 };
+          },
+        };
+      }
+
+      let coachDownloadTracker = null;
+
+      function formatBytes(n) {
+        if (!n || n < 1) return "";
+        if (n < 1024) return n + " B";
+        if (n < 1024 * 1024) return (n / 1024).toFixed(0) + " KB";
+        return (n / (1024 * 1024)).toFixed(1) + " MB";
+      }
+
       function handleCoachProgress(msg) {
         if (!msg) return;
         const fromCache = !!msg.fromCache;
         const verb = fromCache ? "加载" : "下载";
+
+        if (
+          msg.status === "initiate" ||
+          msg.status === "download" ||
+          msg.status === "progress" ||
+          msg.status === "done"
+        ) {
+          if (!coachDownloadTracker) {
+            coachDownloadTracker = createCoachDownloadTracker();
+          }
+          const snap = coachDownloadTracker.onEvent(msg);
+          if (snap) {
+            const sizeText =
+              snap.total > 0
+                ? " · " + formatBytes(snap.loaded) + "/" + formatBytes(snap.total)
+                : "";
+            setCoachProgress(
+              verb +
+                " " +
+                Number(snap.pct).toFixed(0) +
+                "%" +
+                (snap.label ? " · " + snap.label : "") +
+                sizeText,
+              Number(snap.pct)
+            );
+          }
+          return;
+        }
+
         if (msg.status === "progress_total" && msg.progress != null) {
           setCoachProgress(
             verb + "模型 " + Number(msg.progress).toFixed(0) + "%",
@@ -1805,21 +1960,14 @@
           );
           return;
         }
-        if (msg.status === "progress" && msg.progress != null) {
-          const file = msg.file ? String(msg.file).split("/").pop() : "文件";
-          setCoachProgress(
-            verb + " " + file + " " + Number(msg.progress).toFixed(0) + "%",
-            Number(msg.progress)
-          );
-          return;
-        }
         if (msg.status === "loading" && msg.data) {
+          // 已有总进度时，不要被 indeterminate 文案打断跳动
+          if (coachDownloadTracker) return;
           setCoachIndeterminate(String(msg.data));
         } else if (msg.status === "ready") {
-          setCoachProgress(
-            fromCache ? "本地模型就绪" : "模型就绪",
-            100
-          );
+          if (coachDownloadTracker) coachDownloadTracker.finish();
+          setCoachProgress(fromCache ? "本地模型就绪" : "模型就绪", 100);
+          coachDownloadTracker = null;
         }
       }
 
@@ -1870,6 +2018,7 @@
         clearCoachErrorState();
         coachCaption.textContent = "";
         coachTips.innerHTML = "";
+        coachDownloadTracker = null;
         setCoachIndeterminate("准备本地视觉模型…");
 
         try {
