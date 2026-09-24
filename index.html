@@ -387,7 +387,9 @@
     }
 
     #probeRetry,
-    #probeClear {
+    #probeClear,
+    #probeUseGlobal,
+    #probeUseMirror {
       margin-top: 0;
       border: 0;
       border-radius: 12px;
@@ -399,10 +401,22 @@
     }
 
     #probeRetry[hidden],
-    #probeClear[hidden] { display: none; }
+    #probeClear[hidden],
+    #probeUseGlobal[hidden],
+    #probeUseMirror[hidden] { display: none; }
 
-    #probeClear:disabled {
+    #probeClear:disabled,
+    #probeUseGlobal:disabled,
+    #probeUseMirror:disabled {
       opacity: 0.45;
+    }
+
+    #probeUseGlobal {
+      background: rgba(59, 130, 246, 0.35);
+    }
+
+    #probeUseMirror {
+      background: rgba(34, 197, 94, 0.28);
     }
 
 
@@ -624,6 +638,8 @@
       <button id="probeEnter" type="button" hidden>进入拍摄</button>
       <div id="probeActions">
         <button id="probeRetry" type="button" hidden>重新检测</button>
+        <button id="probeUseMirror" type="button" hidden>改用国内镜像</button>
+        <button id="probeUseGlobal" type="button" hidden>改用全球源</button>
         <button id="probeClear" type="button" hidden>清除缓存</button>
       </div>
     </div>
@@ -654,6 +670,8 @@
       const probeEnter = document.getElementById("probeEnter");
       const probeRetry = document.getElementById("probeRetry");
       const probeClear = document.getElementById("probeClear");
+      const probeUseGlobal = document.getElementById("probeUseGlobal");
+      const probeUseMirror = document.getElementById("probeUseMirror");
       const flash = document.getElementById("flash");
       const controls = document.getElementById("controls");
       const zoomBar = document.getElementById("zoomBar");
@@ -1215,28 +1233,46 @@
       async function checkModelHosts() {
         try {
           const engine = await import(coachAssetUrl("coach-engine.js"));
-          // 本地已下齐 → 不依赖外网模型源
+          const pref =
+            engine.getHostPreference && engine.getHostPreference();
+
+          // 本地已下齐 → 不依赖外网模型源（仍尊重偏好）
           if (engine.findCachedModelHost) {
             const cached = await engine.findCachedModelHost();
             if (cached && cached.ok) {
               if (engine.setModelHost) engine.setModelHost(cached.host);
+              const label =
+                (engine.describeHost && engine.describeHost(cached.host)) ||
+                String(cached.host).replace(/^https?:\/\//, "");
               return {
                 ok: true,
-                detail:
-                  "本地已缓存 · " +
-                  String(cached.host).replace(/^https?:\/\//, ""),
+                detail: "本地已缓存 · " + label,
                 host: cached.host,
                 fromCache: true,
+                degraded: false,
+                pref: pref || "auto",
+                isMirror: /hf-mirror/i.test(cached.host),
+                isGlobal: /huggingface\.co/i.test(cached.host),
               };
             }
           }
           const probed = await engine.probeModelHosts();
           if (probed.ok) {
+            const label =
+              probed.label ||
+              (engine.describeHost && engine.describeHost(probed.host)) ||
+              probed.host.replace(/^https?:\/\//, "");
             return {
               ok: true,
-              detail: probed.host.replace(/^https?:\/\//, ""),
+              detail: probed.degraded
+                ? "已降级 · " + label
+                : label,
               host: probed.host,
               fromCache: false,
+              degraded: !!probed.degraded,
+              pref: pref || "auto",
+              isMirror: /hf-mirror/i.test(probed.host),
+              isGlobal: /huggingface\.co/i.test(probed.host),
             };
           }
           const parts = (probed.results || []).map(function (r) {
@@ -1249,6 +1285,10 @@
             detail: parts.length ? parts.join("；") : "均失败",
             host: null,
             fromCache: false,
+            degraded: false,
+            pref: pref || "auto",
+            isMirror: false,
+            isGlobal: false,
           };
         } catch (err) {
           return {
@@ -1256,6 +1296,10 @@
             detail: (err && err.message) || "检测失败",
             host: null,
             fromCache: false,
+            degraded: false,
+            pref: "auto",
+            isMirror: false,
+            isGlobal: false,
           };
         }
       }
@@ -1330,6 +1374,8 @@
         probeEnter.hidden = true;
         probeRetry.hidden = true;
         probeClear.hidden = true;
+        probeUseGlobal.hidden = true;
+        probeUseMirror.hidden = true;
         probeList.hidden = true;
         probeNote.hidden = true;
         probeStatus.textContent = "正在检测设备与依赖…";
@@ -1409,22 +1455,33 @@
             "）。请确认本机有摄像头、已授权浏览器权限，或换有摄像头的设备后再点「重新检测」。";
         } else if (!assistOk) {
           probeNote.textContent =
-            "当前环境无法使用「辅助拍摄」。拍照仍可进入。可点「重新检测」，或换网络 / 桌面 Chrome 后再试。";
+            "当前环境无法使用「辅助拍摄」。国内可点「改用国内镜像」；海外/有代理可点「改用全球源」后重试。";
+        } else if (mirror.degraded || mirror.isMirror) {
+          probeNote.textContent =
+            (mirror.degraded
+              ? "Hugging Face 需代理，已自动改用国内镜像下载。"
+              : "当前使用国内镜像 (hf-mirror)。") +
+            (mirror.fromCache
+              ? "模型已在本地。"
+              : "首次仍需下载。") +
+            " 若你已有代理或在海外，可点「改用全球源」清除镜像缓存并改下 Hugging Face。";
         } else if (mirror.fromCache) {
           probeNote.textContent =
-            "本地已有视觉模型缓存，进入拍摄后点「辅助拍摄」将直接加载，无需再次下载。";
+            "本地已有视觉模型缓存（全球源），进入拍摄后点「辅助拍摄」将直接加载。国内网络不稳时可改用国内镜像。";
         } else if (!gpu.ok) {
           probeNote.textContent =
             "无 WebGPU，辅助拍摄将尝试 WASM（首次下载大、偏慢）。下载中途刷新可自动续传。建议桌面 Chrome。";
         } else {
           probeNote.textContent =
-            "环境正常。进入拍摄后点「辅助拍摄」会首次下载视觉模型（约数百 MB）；中途刷新可续传，下完后下次走本地缓存。";
+            "环境正常，将使用全球源 Hugging Face。国内访问失败时会自动降级 hf-mirror；也可手动切换。";
         }
 
         probeStatus.textContent = "检测完成";
         probeEnter.hidden = false;
         probeRetry.hidden = false;
         probeClear.hidden = false;
+        probeUseGlobal.hidden = false;
+        probeUseMirror.hidden = false;
         probeEnter.disabled = !shootOk;
         probeEnter.textContent = shootOk ? "进入拍摄" : "环境不满足，无法拍摄";
       }
@@ -1435,6 +1492,7 @@
         try {
           localStorage.removeItem("doyen_hf_host");
           localStorage.removeItem("doyen_model_ready");
+          localStorage.removeItem("doyen_hf_pref");
         } catch (_) {}
         try {
           if (typeof window !== "undefined") {
@@ -1727,7 +1785,7 @@
           base = pathName + "/" + fileName;
         }
         // bust browser module cache after deploy
-        return base + "?v=20260924-resume";
+        return base + "?v=20260924-host";
       }
 
       function setCoachProgress(text, percentOrNull) {
@@ -2078,6 +2136,66 @@
         runDeviceProbe();
       });
       probeClear.addEventListener("click", onClearCache);
+
+      async function onSwitchSource(kind) {
+        const btn = kind === "global" ? probeUseGlobal : probeUseMirror;
+        if (btn) btn.disabled = true;
+        if (probeClear) probeClear.disabled = true;
+        if (probeRetry) probeRetry.disabled = true;
+        if (probeEnter) probeEnter.disabled = true;
+
+        const tip =
+          kind === "global"
+            ? "将清除国内镜像缓存，并改用 Hugging Face 全球源。需代理或海外网络。继续？"
+            : "将清除全球源缓存，并改用国内镜像 hf-mirror。继续？";
+        if (!window.confirm(tip)) {
+          if (btn) btn.disabled = false;
+          if (probeClear) probeClear.disabled = false;
+          if (probeRetry) probeRetry.disabled = false;
+          if (probeEnter) probeEnter.disabled = false;
+          return;
+        }
+
+        probeStatus.textContent =
+          kind === "global" ? "正在切换到全球源…" : "正在切换到国内镜像…";
+        try {
+          const engine = await import(coachAssetUrl("coach-engine.js"));
+          if (kind === "global") {
+            const res = await engine.switchToGlobalSource();
+            showToast(
+              "已切全球源，清除镜像文件 " +
+                (res.clearedMirrorFiles || 0) +
+                " 个",
+              "ok"
+            );
+          } else {
+            const res = await engine.switchToMirrorSource();
+            showToast(
+              "已切国内镜像，清除全球源文件 " +
+                (res.clearedGlobalFiles || 0) +
+                " 个",
+              "ok"
+            );
+          }
+          // 切源后重置页面内 coach 状态
+          coachReady = false;
+          coachLoading = false;
+          coachEngine = null;
+          await runDeviceProbe();
+        } catch (err) {
+          showToast((err && err.message) || "切换失败", "err");
+          if (btn) btn.disabled = false;
+          if (probeClear) probeClear.disabled = false;
+          if (probeRetry) probeRetry.disabled = false;
+        }
+      }
+
+      probeUseGlobal.addEventListener("click", function () {
+        onSwitchSource("global");
+      });
+      probeUseMirror.addEventListener("click", function () {
+        onSwitchSource("mirror");
+      });
       shutter.addEventListener("click", onShutter);
       flipBtn.addEventListener("click", flipCamera);
 

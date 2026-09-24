@@ -14,7 +14,7 @@ import {
   onResumeProgress,
   clearResumePartials,
   listResumePartials,
-} from "./resume-download.js?v=20260924-resume";
+} from "./resume-download.js?v=20260924-host";
 
 env.allowLocalModels = false;
 env.useBrowserCache = true;
@@ -27,10 +27,10 @@ export { clearResumePartials, listResumePartials };
 const MODEL_ID = "onnx-community/Florence-2-base-ft";
 const TRANSFORMERS_CACHE = "transformers-cache";
 const READY_KEY = "doyen_model_ready";
-const HOST_CANDIDATES = [
-  "https://huggingface.co",
-  "https://hf-mirror.com",
-];
+const HOST_PREF_KEY = "doyen_hf_pref"; // auto | global | mirror
+const GLOBAL_HOST = "https://huggingface.co";
+const MIRROR_HOST = "https://hf-mirror.com";
+const HOST_CANDIDATES = [GLOBAL_HOST, MIRROR_HOST];
 
 // 判定本地是否已下齐：配置 + tokenizer + 本项目 dtype 对应的 onnx
 const REQUIRED_FILES = [
@@ -57,28 +57,83 @@ const ONNX_FILE_GROUPS = [
   ],
 ];
 
+function normalizeHost(host) {
+  return String(host || "").replace(/\/$/, "");
+}
+
+function isMirrorHost(host) {
+  return /hf-mirror\.com/i.test(normalizeHost(host));
+}
+
+function isGlobalHost(host) {
+  return /huggingface\.co/i.test(normalizeHost(host));
+}
+
+function hostLabel(host) {
+  const h = normalizeHost(host);
+  if (isMirrorHost(h)) return "国内镜像 (hf-mirror)";
+  if (isGlobalHost(h)) return "全球源 (Hugging Face)";
+  return h.replace(/^https?:\/\//, "") || "未知";
+}
+
 function applyRemoteHost(host) {
   if (!host) return;
-  env.remoteHost = host.replace(/\/$/, "");
+  env.remoteHost = normalizeHost(host);
+}
+
+export function getHostPreference() {
+  try {
+    if (typeof localStorage !== "undefined") {
+      const pref = localStorage.getItem(HOST_PREF_KEY);
+      if (pref === "global" || pref === "mirror" || pref === "auto") return pref;
+    }
+  } catch (_) {}
+  return "auto";
+}
+
+export function setHostPreference(pref) {
+  const next =
+    pref === "global" || pref === "mirror" || pref === "auto" ? pref : "auto";
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(HOST_PREF_KEY, next);
+    }
+  } catch (_) {}
+  return next;
 }
 
 function resolvePreferredHost() {
   try {
     if (typeof window !== "undefined" && window.__DOYEN_HF_HOST__) {
-      return String(window.__DOYEN_HF_HOST__);
+      return normalizeHost(window.__DOYEN_HF_HOST__);
     }
     if (typeof localStorage !== "undefined") {
       const saved = localStorage.getItem("doyen_hf_host");
-      if (saved) return saved;
+      if (saved) return normalizeHost(saved);
     }
   } catch (_) {}
-  return HOST_CANDIDATES[0];
+  const pref = getHostPreference();
+  if (pref === "mirror") return MIRROR_HOST;
+  if (pref === "global") return GLOBAL_HOST;
+  return GLOBAL_HOST;
 }
 
 applyRemoteHost(resolvePreferredHost());
 
 export function getModelHosts() {
   return HOST_CANDIDATES.slice();
+}
+
+export function getGlobalHost() {
+  return GLOBAL_HOST;
+}
+
+export function getMirrorHost() {
+  return MIRROR_HOST;
+}
+
+export function describeHost(host) {
+  return hostLabel(host || env.remoteHost);
 }
 
 export function setModelHost(host) {
@@ -95,6 +150,15 @@ export function setModelHost(host) {
 
 export function getModelHost() {
   return env.remoteHost;
+}
+
+/** 清空内存中的模型，切源后必须调用 */
+export function resetCoachRuntime() {
+  processorPromise = null;
+  tokenizerPromise = null;
+  modelPromise = null;
+  warmed = false;
+  deviceUsed = null;
 }
 
 function modelFileUrl(host, file) {
@@ -150,15 +214,27 @@ async function hostHasCompleteModel(host) {
 }
 
 /**
- * 若浏览器 Cache API 里已有完整模型，返回对应 host（优先已保存源）
+ * 若浏览器 Cache API 里已有完整模型，返回对应 host
+ * （尊重用户源偏好：强制全球/国内时不串用另一源的缓存）
  */
 export async function findCachedModelHost() {
+  const pref = getHostPreference();
   const ordered = [];
-  const preferred = resolvePreferredHost();
-  if (preferred) ordered.push(preferred);
-  HOST_CANDIDATES.forEach(function (h) {
-    if (ordered.indexOf(h) < 0) ordered.push(h);
-  });
+
+  function push(h) {
+    const n = normalizeHost(h);
+    if (!n || ordered.indexOf(n) >= 0) return;
+    ordered.push(n);
+  }
+
+  if (pref === "global") {
+    push(GLOBAL_HOST);
+  } else if (pref === "mirror") {
+    push(MIRROR_HOST);
+  } else {
+    push(resolvePreferredHost());
+    HOST_CANDIDATES.forEach(push);
+  }
 
   for (let i = 0; i < ordered.length; i++) {
     const host = ordered[i];
@@ -207,18 +283,21 @@ export function readModelReadyFlag() {
 
 /**
  * 探测哪个模型源可从当前浏览器 CORS 访问
+ * @param {string} host
+ * @param {number} [timeoutMs]
  */
-async function probeSingleHost(host) {
+async function probeSingleHost(host, timeoutMs) {
+  const ms = typeof timeoutMs === "number" ? timeoutMs : 8000;
   const ctrl =
     typeof AbortController !== "undefined" ? new AbortController() : null;
   const timer = ctrl
     ? setTimeout(function () {
         ctrl.abort();
-      }, 8000)
+      }, ms)
     : null;
   try {
     const url =
-      host.replace(/\/$/, "") + "/" + MODEL_ID + "/resolve/main/config.json";
+      normalizeHost(host) + "/" + MODEL_ID + "/resolve/main/config.json";
     const res = await fetch(url, {
       method: "GET",
       mode: "cors",
@@ -233,22 +312,203 @@ async function probeSingleHost(host) {
   }
 }
 
+function buildProbeOrder() {
+  const pref = getHostPreference();
+  const saved = resolvePreferredHost();
+  const order = [];
+
+  function push(h) {
+    const n = normalizeHost(h);
+    if (!n || order.indexOf(n) >= 0) return;
+    order.push(n);
+  }
+
+  if (pref === "mirror") {
+    push(MIRROR_HOST);
+    push(GLOBAL_HOST);
+  } else if (pref === "global") {
+    push(GLOBAL_HOST);
+    push(MIRROR_HOST);
+  } else {
+    // auto：先快速试全球源，不通立刻降级国内镜像
+    push(GLOBAL_HOST);
+    push(MIRROR_HOST);
+    // 若上次成功是镜像，也确保镜像在列表里（已有）
+    push(saved);
+  }
+  return order;
+}
+
+/**
+ * 探测可用模型源。auto 模式下 Hugging Face 仅给短超时，失败则降级 hf-mirror。
+ */
 export async function probeModelHosts(onProgress) {
+  const order = buildProbeOrder();
+  const pref = getHostPreference();
   const results = [];
-  for (let i = 0; i < HOST_CANDIDATES.length; i++) {
-    const host = HOST_CANDIDATES[i];
+
+  for (let i = 0; i < order.length; i++) {
+    const host = order[i];
+    const isGlobal = isGlobalHost(host);
+    // 全球源在 auto 下用短超时，避免国内傻等
+    const timeoutMs =
+      pref === "auto" && isGlobal ? 3500 : isGlobal ? 8000 : 8000;
+
     if (onProgress) {
-      onProgress({ status: "loading", data: "探测 " + host + "…" });
+      onProgress({
+        status: "loading",
+        data:
+          "探测 " +
+          hostLabel(host) +
+          (pref === "auto" && isGlobal ? "（超时将用国内镜像）" : "") +
+          "…",
+      });
     }
-    const ok = await probeSingleHost(host);
+
+    const ok = await probeSingleHost(host, timeoutMs);
     if (ok) {
       results.push({ host: host, ok: true, detail: "可访问" });
       setModelHost(host);
-      return { ok: true, host: host, results: results };
+      const degraded = pref === "auto" && isMirrorHost(host) && isGlobalHost(order[0]);
+      return {
+        ok: true,
+        host: host,
+        results: results,
+        degraded: !!degraded,
+        label: hostLabel(host),
+      };
     }
-    results.push({ host: host, ok: false, detail: "不可用" });
+    results.push({
+      host: host,
+      ok: false,
+      detail: isGlobal && pref === "auto" ? "超时/不可达，将降级" : "不可用",
+    });
   }
-  return { ok: false, host: null, results: results };
+  return { ok: false, host: null, results: results, degraded: false };
+}
+
+/**
+ * 清除指定 host 在 Cache API 中的模型文件
+ */
+export async function clearHostModelCache(host) {
+  const target = normalizeHost(host);
+  let deleted = 0;
+  const cache = await openTransformersCache();
+  if (cache && cache.keys) {
+    const keys = await cache.keys();
+    for (let i = 0; i < keys.length; i++) {
+      const req = keys[i];
+      const url = (req && req.url) || String(req);
+      if (url.indexOf(target) >= 0) {
+        try {
+          await cache.delete(req);
+          deleted += 1;
+        } catch (_) {}
+      }
+    }
+  }
+
+  // 清该源的续传半成品
+  try {
+    const partials = await listResumePartials();
+    for (let i = 0; i < partials.length; i++) {
+      const row = partials[i];
+      if (row && row.url && row.url.indexOf(target) >= 0) {
+        // listResumePartials 无单条删除，整体 clear 太狠；用 IDB 直接删
+      }
+    }
+  } catch (_) {}
+
+  try {
+    const dbName = "doyen-resume-v1";
+    await new Promise(function (resolve) {
+      const open = indexedDB.open(dbName, 1);
+      open.onerror = function () {
+        resolve();
+      };
+      open.onupgradeneeded = function () {
+        const db = open.result;
+        if (!db.objectStoreNames.contains("partials")) {
+          db.createObjectStore("partials", { keyPath: "url" });
+        }
+      };
+      open.onsuccess = function () {
+        const db = open.result;
+        try {
+          const tx = db.transaction("partials", "readwrite");
+          const store = tx.objectStore("partials");
+          const req = store.openCursor();
+          req.onsuccess = function () {
+            const cursor = req.result;
+            if (!cursor) return;
+            const val = cursor.value;
+            if (val && val.url && String(val.url).indexOf(target) >= 0) {
+              cursor.delete();
+            }
+            cursor.continue();
+          };
+          tx.oncomplete = function () {
+            db.close();
+            resolve();
+          };
+          tx.onerror = function () {
+            db.close();
+            resolve();
+          };
+        } catch (_) {
+          db.close();
+          resolve();
+        }
+      };
+    });
+  } catch (_) {}
+
+  const ready = readModelReadyFlag();
+  if (ready && normalizeHost(ready.host) === target) {
+    clearModelReadyFlag();
+  }
+
+  return { deleted: deleted, host: target };
+}
+
+/**
+ * 切换到全球源：清掉国内镜像缓存，强制用 huggingface.co
+ */
+export async function switchToGlobalSource() {
+  setHostPreference("global");
+  const cleared = await clearHostModelCache(MIRROR_HOST);
+  setModelHost(GLOBAL_HOST);
+  resetCoachRuntime();
+  clearModelReadyFlag();
+  return {
+    host: GLOBAL_HOST,
+    label: hostLabel(GLOBAL_HOST),
+    clearedMirrorFiles: cleared.deleted,
+  };
+}
+
+/**
+ * 切换到国内镜像：清掉全球源缓存，强制用 hf-mirror
+ */
+export async function switchToMirrorSource() {
+  setHostPreference("mirror");
+  const cleared = await clearHostModelCache(GLOBAL_HOST);
+  setModelHost(MIRROR_HOST);
+  resetCoachRuntime();
+  clearModelReadyFlag();
+  return {
+    host: MIRROR_HOST,
+    label: hostLabel(MIRROR_HOST),
+    clearedGlobalFiles: cleared.deleted,
+  };
+}
+
+/**
+ * 恢复自动：全球源短超时失败则降级镜像
+ */
+export function switchToAutoSource() {
+  setHostPreference("auto");
+  return { pref: "auto" };
 }
 
 let processorPromise = null;
@@ -358,30 +618,22 @@ export async function loadCoach(onProgress, options) {
         fromCache: true,
       });
     } else {
-      // 无完整缓存时再探测可用源（并优先保留上次成功的源）
+      // 无完整缓存：探测可用源；HF 不通时自动降级国内镜像
       notify(onProgress, { status: "loading", data: "选择可用模型源…" });
-      const preferred = resolvePreferredHost();
-      let hostProbe = null;
-
-      // 先试上次成功的源，避免每次被 huggingface.co 抢走导致换源重下
-      if (preferred) {
-        const preferredOk = await probeSingleHost(preferred);
-        if (preferredOk) {
-          hostProbe = { ok: true, host: preferred };
-        }
-      }
-      if (!hostProbe || !hostProbe.ok) {
-        hostProbe = await probeModelHosts(onProgress);
-      }
+      const hostProbe = await probeModelHosts(onProgress);
       if (!hostProbe.ok) {
         throw new Error(
-          "无法访问模型源（huggingface.co / hf-mirror.com 均失败）。请换网络或开代理后重试。"
+          "无法访问模型源（Hugging Face / hf-mirror 均失败）。国内可改用镜像；海外请开代理后点「改用全球源」。"
         );
       }
       setModelHost(hostProbe.host);
       notify(onProgress, {
         status: "loading",
-        data: "使用模型源 " + hostProbe.host + "（首次需下载）",
+        data: hostProbe.degraded
+          ? "Hugging Face 不可达，已降级 " +
+            hostProbe.label +
+            "（首次需下载）"
+          : "使用" + hostProbe.label + "（首次需下载）",
       });
     }
 
