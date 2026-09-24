@@ -1553,15 +1553,12 @@
       let coachDetectGen = 0;
 
       function coachAssetUrl(fileName) {
-        const pathName = location.pathname || "/";
-        let base;
-        if (pathName.endsWith("/")) base = pathName + fileName;
-        else if (/\.html?$/i.test(pathName)) {
-          base = pathName.replace(/[^/]+$/, fileName);
-        } else {
-          base = pathName + "/" + fileName;
-        }
-        return base + "?v=20260924-lite1";
+        // jsDelivr 更新比 GitHub Pages 更快，避免发布后仍加载旧 Florence 引擎
+        return (
+          "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/" +
+          fileName +
+          "?v=20260924-lite2"
+        );
       }
 
       function setCoachHint(text) {

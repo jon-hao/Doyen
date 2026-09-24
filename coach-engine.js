@@ -32,8 +32,30 @@ function assetUrl(rel) {
   return dir + rel.replace(/^\//, "");
 }
 
-function modelAssetUrl() {
-  return assetUrl("models/efficientdet_lite0.tflite");
+function modelCandidateUrls() {
+  const local = assetUrl("models/efficientdet_lite0.tflite");
+  return [
+    local,
+    "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/models/efficientdet_lite0.tflite",
+    "https://raw.githubusercontent.com/jon-hao/Doyen/main/models/efficientdet_lite0.tflite",
+  ];
+}
+
+async function fetchModelBuffer(onProgress) {
+  const urls = modelCandidateUrls();
+  let lastErr = null;
+  for (let i = 0; i < urls.length; i++) {
+    try {
+      return await fetchWithProgress(
+        urls[i],
+        onProgress,
+        "efficientdet_lite0.tflite"
+      );
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error("模型文件不可用");
 }
 
 function markModelReady() {
@@ -95,8 +117,13 @@ export async function findCachedModelHost() {
   if (flag) return { ok: true, host: "local" };
   // 同域模型文件视为「可本地加载」；是否已在 Cache 里由浏览器决定
   try {
-    const res = await fetch(modelAssetUrl(), { method: "HEAD", cache: "force-cache" });
-    if (res && res.ok) return { ok: true, host: "local" };
+    const urls = modelCandidateUrls();
+    for (let i = 0; i < urls.length; i++) {
+      try {
+        const res = await fetch(urls[i], { method: "HEAD", cache: "force-cache" });
+        if (res && res.ok) return { ok: true, host: "local" };
+      } catch (_) {}
+    }
   } catch (_) {}
   return { ok: false, host: null };
 }
@@ -193,11 +220,7 @@ async function createDetector(onProgress) {
     total: MODEL_BYTES,
   });
 
-  const modelBuffer = await fetchWithProgress(
-    modelAssetUrl(),
-    onProgress,
-    "efficientdet_lite0.tflite"
-  );
+  const modelBuffer = await fetchModelBuffer(onProgress);
 
   notify(onProgress, { status: "loading", data: "初始化检测器…" });
 
