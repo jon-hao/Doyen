@@ -6,6 +6,7 @@
     name="viewport"
     content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no"
   />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>Doyen Camera</title>
@@ -58,23 +59,26 @@
       background: #000;
     }
 
-    /* iOS Safari 对 video + object-fit:cover 不可靠：尺寸交给 JS 算 cover */
+    /* iOS Safari 常忽略 video 的 object-fit；铺满改由 JS transform scale 完成 */
     #preview {
       position: absolute;
-      top: 0;
-      left: 0;
+      top: 50%;
+      left: 50%;
       display: block;
       margin: 0;
       padding: 0;
       border: 0;
       background: #000;
+      width: auto;
+      height: auto;
+      max-width: none;
+      max-height: none;
+      min-width: 100%;
+      min-height: 100%;
+      transform: translate(-50%, -50%);
       transform-origin: center center;
       transition: none;
-      /* 元数据未到前先铺满，避免 300×150 默认小窗 */
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      object-position: center center;
+      object-fit: fill;
       -webkit-backface-visibility: hidden;
       backface-visibility: hidden;
     }
@@ -757,66 +761,77 @@
         await applyZoomFactor(nextZoom);
       }
 
-      function layoutVideos() {
+      function getStageSize() {
         const stageEl = document.getElementById("stage");
-        const sw = Math.max(
-          1,
-          (stageEl && stageEl.clientWidth) || window.innerWidth || 1
-        );
-        const sh = Math.max(
-          1,
-          (stageEl && stageEl.clientHeight) ||
-            window.innerHeight ||
-            (window.visualViewport && window.visualViewport.height) ||
-            1
-        );
-        const vw = video.videoWidth;
-        const vh = video.videoHeight;
+        const vv = window.visualViewport;
+        return {
+          sw: Math.max(
+            1,
+            (stageEl && stageEl.clientWidth) ||
+              (vv && vv.width) ||
+              window.innerWidth ||
+              1
+          ),
+          sh: Math.max(
+            1,
+            (stageEl && stageEl.clientHeight) ||
+              (vv && vv.height) ||
+              window.innerHeight ||
+              1
+          ),
+        };
+      }
+
+      function layoutVideos() {
+        const size = getStageSize();
+        const sw = size.sw;
+        const sh = size.sh;
+        const vw = video.videoWidth | 0;
+        const vh = video.videoHeight | 0;
 
         video.style.position = "absolute";
+        video.style.top = "50%";
+        video.style.left = "50%";
+        video.style.right = "auto";
+        video.style.bottom = "auto";
         video.style.margin = "0";
         video.style.padding = "0";
         video.style.border = "0";
         video.style.maxWidth = "none";
         video.style.maxHeight = "none";
-        video.style.minWidth = "0";
-        video.style.minHeight = "0";
-        video.style.right = "auto";
-        video.style.bottom = "auto";
         video.style.zIndex = "0";
-
-        if (!vw || !vh) {
-          // 尚未拿到帧尺寸：先用 CSS cover 撑满，避免默认小窗黑框
-          video.style.top = "0";
-          video.style.left = "0";
-          video.style.width = sw + "px";
-          video.style.height = sh + "px";
-          video.style.objectFit = "cover";
-          video.style.objectPosition = "center center";
-          updatePreviewTransform();
-          return;
-        }
-
-        // 按视频真实宽高比做 cover：短边撑满，居中裁切（不依赖 object-fit）
-        const scale = Math.max(sw / vw, sh / vh);
-        const w = Math.ceil(vw * scale);
-        const h = Math.ceil(vh * scale);
-        video.style.top = Math.floor((sh - h) / 2) + "px";
-        video.style.left = Math.floor((sw - w) / 2) + "px";
-        video.style.width = w + "px";
-        video.style.height = h + "px";
-        // 元素框已与画面同比例，fill 只是铺满该框，不会变形
+        // 禁止依赖 object-fit：iOS 上对 <video> 经常失效导致黑框
         video.style.objectFit = "fill";
         video.style.objectPosition = "center center";
-        updatePreviewTransform();
+
+        let cover = 1;
+        if (vw > 0 && vh > 0) {
+          // 元素保持视频原生比例，用 transform scale 做 cover（iOS 可靠）
+          video.style.width = vw + "px";
+          video.style.height = vh + "px";
+          video.style.minWidth = "0";
+          video.style.minHeight = "0";
+          cover = Math.max(sw / vw, sh / vh);
+        } else {
+          // 元数据未到：先用 min 边撑满，避免 300×150 小窗
+          video.style.width = "auto";
+          video.style.height = "auto";
+          video.style.minWidth = sw + "px";
+          video.style.minHeight = sh + "px";
+          cover = 1;
+        }
+
+        const zoom = digitalScale > 1.01 ? digitalScale : 1;
+        const s = cover * zoom;
+        const sx = facingMode === "user" ? -s : s;
+        const tf = "translate(-50%, -50%) scale(" + sx + ", " + s + ")";
+        video.style.transformOrigin = "center center";
+        video.style.transform = tf;
+        video.style.webkitTransform = tf;
       }
 
       function updatePreviewTransform() {
-        const parts = [];
-        if (facingMode === "user") parts.push("scaleX(-1)");
-        if (digitalScale > 1.01) parts.push("scale(" + digitalScale + ")");
-        video.style.transformOrigin = "center center";
-        video.style.transform = parts.length ? parts.join(" ") : "none";
+        layoutVideos();
       }
 
       function scheduleLayoutVideos() {
@@ -825,6 +840,10 @@
           layoutVideos();
           requestAnimationFrame(layoutVideos);
         });
+        // iOS 切镜头 / 地址栏伸缩后尺寸常晚一拍
+        setTimeout(layoutVideos, 50);
+        setTimeout(layoutVideos, 200);
+        setTimeout(layoutVideos, 500);
       }
 
       async function resumePreview() {
@@ -1549,7 +1568,7 @@
         } else {
           base = pathName + "/" + fileName;
         }
-        return base + "?v=20260924-fullscreen3";
+        return base + "?v=20260924-cover-tf1";
       }
 
       function setCoachHint(text) {
