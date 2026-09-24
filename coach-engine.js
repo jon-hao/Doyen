@@ -14,7 +14,7 @@ import {
   onResumeProgress,
   clearResumePartials,
   listResumePartials,
-} from "./resume-download.js?v=20260924-host";
+} from "./resume-download.js?v=20260924-subject";
 
 env.allowLocalModels = false;
 env.useBrowserCache = true;
@@ -824,6 +824,81 @@ export async function analyzeFrame(source, onProgress) {
     objects: objects,
     device: deviceUsed,
   };
+}
+
+/**
+ * 只做目标检测（主体框），比完整 analyze 更快，供实时跟踪
+ * @param {Blob|HTMLCanvasElement} source
+ */
+export async function detectSubjects(source, onProgress) {
+  if (!modelPromise || !warmed) {
+    await loadCoach(onProgress);
+  }
+
+  let image;
+  if (typeof HTMLCanvasElement !== "undefined" && source instanceof HTMLCanvasElement) {
+    image = RawImage.fromCanvas(source);
+  } else if (source && typeof Blob !== "undefined" && source instanceof Blob) {
+    image = await RawImage.fromBlob(source);
+  } else {
+    throw new Error("无法读取当前画面");
+  }
+
+  const processor = await processorPromise;
+  const image_size = image.size;
+  const vision_inputs = await processor(image);
+  const odTask = "<OD>";
+  const odResult = await runTask(odTask, vision_inputs, image_size);
+  const od = (odResult && odResult[odTask]) || {};
+  const labels = od.labels || [];
+  const bboxes = od.bboxes || [];
+  const objects = labels.map(function (label, i) {
+    return { label: label, bbox: bboxes[i] || null };
+  });
+
+  return {
+    objects: objects,
+    imageSize: image_size,
+    device: deviceUsed,
+  };
+}
+
+/**
+ * 从检测结果里挑主拍摄主体（优先人，否则最大框）
+ */
+export function pickPrimarySubject(objects) {
+  const list = objects || [];
+  if (!list.length) return null;
+  const priority = [
+    "person",
+    "man",
+    "woman",
+    "boy",
+    "girl",
+    "human",
+    "face",
+    "people",
+  ];
+  for (let i = 0; i < list.length; i++) {
+    const lab = String(list[i].label || "").toLowerCase();
+    if (priority.some(function (p) {
+      return lab.indexOf(p) >= 0;
+    })) {
+      return list[i];
+    }
+  }
+  let best = null;
+  let bestArea = -1;
+  for (let i = 0; i < list.length; i++) {
+    const b = list[i].bbox;
+    if (!b || b.length < 4) continue;
+    const area = Math.abs(b[2] - b[0]) * Math.abs(b[3] - b[1]);
+    if (area > bestArea) {
+      bestArea = area;
+      best = list[i];
+    }
+  }
+  return best;
 }
 
 export function getCoachDevice() {

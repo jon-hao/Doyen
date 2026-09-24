@@ -327,98 +327,6 @@
       font-size: 15px;
     }
 
-    #probeList {
-      width: min(400px, 100%);
-      margin: 4px 0 0;
-      padding: 12px 14px;
-      border-radius: 14px;
-      background: rgba(255, 255, 255, 0.08);
-      text-align: left;
-      list-style: none;
-    }
-
-    #probeList li {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      padding: 8px 0;
-      font-size: 13px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-      line-height: 1.35;
-    }
-
-    #probeList li:last-child { border-bottom: 0; }
-    #probeList .ok { color: #4ade80; font-weight: 600; text-align: right; }
-    #probeList .warn { color: #fbbf24; font-weight: 600; text-align: right; }
-    #probeList .no { color: #f87171; font-weight: 600; text-align: right; }
-    #probeList .label { color: rgba(255, 255, 255, 0.78); }
-
-    #probeNote {
-      margin: 0;
-      max-width: 24em;
-      font-size: 12px;
-      line-height: 1.45;
-      color: rgba(255, 255, 255, 0.55);
-    }
-
-    #probeEnter {
-      margin-top: 6px;
-      border: 0;
-      border-radius: 12px;
-      padding: 12px 22px;
-      font-size: 16px;
-      font-weight: 600;
-      color: #111;
-      background: #fff;
-    }
-
-    #probeEnter:disabled {
-      opacity: 0.4;
-    }
-
-    #probeEnter[hidden] { display: none; }
-
-    #probeActions {
-      display: flex;
-      flex-wrap: wrap;
-      justify-content: center;
-      gap: 8px;
-      margin-top: 2px;
-    }
-
-    #probeRetry,
-    #probeClear,
-    #probeUseGlobal,
-    #probeUseMirror {
-      margin-top: 0;
-      border: 0;
-      border-radius: 12px;
-      padding: 10px 18px;
-      font-size: 14px;
-      font-weight: 600;
-      color: #fff;
-      background: rgba(255, 255, 255, 0.16);
-    }
-
-    #probeRetry[hidden],
-    #probeClear[hidden],
-    #probeUseGlobal[hidden],
-    #probeUseMirror[hidden] { display: none; }
-
-    #probeClear:disabled,
-    #probeUseGlobal:disabled,
-    #probeUseMirror:disabled {
-      opacity: 0.45;
-    }
-
-    #probeUseGlobal {
-      background: rgba(59, 130, 246, 0.35);
-    }
-
-    #probeUseMirror {
-      background: rgba(34, 197, 94, 0.28);
-    }
-
 
     #flash {
       position: absolute;
@@ -432,13 +340,24 @@
     #flash.show { opacity: 0.85; }
 
 
-    #coachBtn {
+    #coachSlot {
       justify-self: start;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 4px;
+      max-width: 110px;
+    }
+
+    #coachBtn {
+      position: relative;
+      isolation: isolate;
+      overflow: hidden;
       min-width: 72px;
       height: 48px;
-      border: 0;
+      border: 2px solid rgba(255, 255, 255, 0.28);
       border-radius: 999px;
-      background: rgba(255, 255, 255, 0.18);
+      background: rgba(255, 255, 255, 0.12);
       color: #fff;
       font-size: 13px;
       font-weight: 700;
@@ -446,166 +365,70 @@
       -webkit-backdrop-filter: blur(10px);
       padding: 0 12px;
       white-space: nowrap;
+      z-index: 0;
     }
 
-    #coachBtn:disabled { opacity: 0.35; }
-
-    #coachBtn.busy {
-      color: #f5d76e;
-    }
-
-    #coachPanel {
+    #coachBtn::before {
+      content: "";
       position: absolute;
-      left: 12px;
-      right: 12px;
-      bottom: calc(120px + var(--safe-bottom));
-      z-index: 8;
-      display: none;
-      flex-direction: column;
-      gap: 10px;
-      padding: 14px 16px 16px;
-      border-radius: 18px;
-      background: rgba(0, 0, 0, 0.82);
-      backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
-      color: #fff;
-      max-height: 42vh;
-      overflow: auto;
-      pointer-events: auto;
+      inset: 0;
+      width: var(--coach-progress, 0%);
+      background: rgba(74, 222, 128, 0.35);
+      z-index: -1;
+      transition: width 0.15s linear;
     }
 
-    #coachPanel.show { display: flex; }
-
-    #coachPanel.err {
-      border: 1px solid rgba(248, 113, 113, 0.55);
+    #coachBtn:disabled {
+      opacity: 0.35;
     }
 
-    #coachCaption.err {
-      color: #fca5a5;
-      font-size: 13px;
-      line-height: 1.5;
-      white-space: pre-wrap;
-      word-break: break-word;
+    #coachBtn.loading {
+      pointer-events: none;
+      border-color: rgba(74, 222, 128, 0.45);
+      color: rgba(255, 255, 255, 0.9);
     }
 
-    #coachPanel header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
+    #coachBtn.active {
+      border-color: #4ade80;
+      color: #4ade80;
+      background: rgba(74, 222, 128, 0.12);
+      box-shadow: 0 0 0 1px rgba(74, 222, 128, 0.25);
     }
 
-    #coachPanel h2 {
+    #coachHint {
       margin: 0;
-      font-size: 15px;
-      font-weight: 700;
+      min-height: 14px;
+      max-width: 108px;
+      font-size: 10px;
+      line-height: 1.25;
+      color: rgba(255, 255, 255, 0.55);
+      text-align: left;
     }
 
-    #coachClose {
-      border: 0;
-      background: transparent;
-      color: rgba(255, 255, 255, 0.7);
-      font-size: 20px;
-      line-height: 1;
-      padding: 4px 6px;
-    }
-
-    #coachHeaderActions {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-
-    #coachClear {
-      border: 0;
-      border-radius: 8px;
-      padding: 4px 8px;
-      font-size: 12px;
-      font-weight: 600;
-      color: rgba(255, 255, 255, 0.78);
-      background: rgba(255, 255, 255, 0.12);
-    }
-
-    #coachProgress {
-      display: none;
-      font-size: 12px;
-      color: rgba(255, 255, 255, 0.7);
-      line-height: 1.4;
-    }
-
-    #coachProgress.show { display: block; }
-
-    #coachProgressBar {
-      margin-top: 8px;
-      height: 4px;
-      border-radius: 999px;
-      background: rgba(255, 255, 255, 0.15);
-      overflow: hidden;
-    }
-
-    #coachProgressBar > i {
-      display: block;
+    #subjectOverlay {
+      position: absolute;
+      inset: 0;
+      width: 100%;
       height: 100%;
-      width: 0%;
-      background: #f5d76e;
-      border-radius: 999px;
-      transition: width 0.15s ease-out;
+      pointer-events: none;
+      z-index: 2;
     }
-
-    #coachProgressBar.indeterminate > i {
-      width: 35% !important;
-      animation: coachPulse 1.1s ease-in-out infinite;
-    }
-
-    @keyframes coachPulse {
-      0% { transform: translateX(-120%); }
-      100% { transform: translateX(320%); }
-    }
-
-    #coachCaption {
-      margin: 0;
-      font-size: 12px;
-      line-height: 1.45;
-      color: rgba(255, 255, 255, 0.62);
-    }
-
-    #coachTips {
-      margin: 0;
-      padding-left: 1.1em;
-      font-size: 14px;
-      line-height: 1.55;
-    }
-
-    #coachTips li { margin: 0 0 6px; }
 
     canvas#shot { display: none; }
+
   </style>
 </head>
 <body>
   <div id="app">
     <div id="stage">
       <video id="preview" playsinline autoplay muted></video>
+      <canvas id="subjectOverlay"></canvas>
     </div>
     <canvas id="shot"></canvas>
     <div id="flash"></div>
 
     <div id="overlay">
       <div id="toast"></div>
-      <div id="coachPanel" aria-live="polite">
-        <header>
-          <h2>辅助拍摄</h2>
-          <div id="coachHeaderActions">
-            <button id="coachClear" type="button">清除缓存</button>
-            <button id="coachClose" type="button" aria-label="关闭">×</button>
-          </div>
-        </header>
-        <div id="coachProgress">
-          <span id="coachProgressText">准备中…</span>
-          <div id="coachProgressBar"><i id="coachProgressFill"></i></div>
-        </div>
-        <p id="coachCaption"></p>
-        <ol id="coachTips"></ol>
-      </div>
       <div id="controls">
         <div id="focalRow">
           <div id="modeBar">
@@ -617,7 +440,10 @@
           </div>
         </div>
         <div id="bottomRow">
-          <button id="coachBtn" type="button" aria-label="辅助拍摄" disabled>辅助拍摄</button>
+          <div id="coachSlot">
+            <button id="coachBtn" type="button" aria-label="辅助拍摄" disabled>辅助拍摄</button>
+            <p id="coachHint"></p>
+          </div>
           <button id="shutter" type="button" aria-label="拍照" disabled></button>
           <button id="flipBtn" type="button" aria-label="切换摄像头" disabled>⟲</button>
         </div>
@@ -632,16 +458,8 @@
 
     <div id="probe" class="show">
       <h2>环境检测</h2>
-      <p id="probeStatus">正在检测设备与依赖…</p>
-      <ul id="probeList" hidden></ul>
-      <p id="probeNote" hidden></p>
+      <p id="probeStatus">正在检测…</p>
       <button id="probeEnter" type="button" hidden>进入拍摄</button>
-      <div id="probeActions">
-        <button id="probeRetry" type="button" hidden>重新检测</button>
-        <button id="probeUseMirror" type="button" hidden>改用国内镜像</button>
-        <button id="probeUseGlobal" type="button" hidden>改用全球源</button>
-        <button id="probeClear" type="button" hidden>清除缓存</button>
-      </div>
     </div>
   </div>
 
@@ -652,26 +470,14 @@
       const shutter = document.getElementById("shutter");
       const flipBtn = document.getElementById("flipBtn");
       const coachBtn = document.getElementById("coachBtn");
-      const coachPanel = document.getElementById("coachPanel");
-      const coachClose = document.getElementById("coachClose");
-      const coachClear = document.getElementById("coachClear");
-      const coachProgress = document.getElementById("coachProgress");
-      const coachProgressText = document.getElementById("coachProgressText");
-      const coachProgressFill = document.getElementById("coachProgressFill");
-      const coachCaption = document.getElementById("coachCaption");
-      const coachTips = document.getElementById("coachTips");
+      const coachHint = document.getElementById("coachHint");
+      const subjectOverlay = document.getElementById("subjectOverlay");
       const toast = document.getElementById("toast");
       const gate = document.getElementById("gate");
       const secureHint = document.getElementById("secureHint");
       const probe = document.getElementById("probe");
       const probeStatus = document.getElementById("probeStatus");
-      const probeList = document.getElementById("probeList");
-      const probeNote = document.getElementById("probeNote");
       const probeEnter = document.getElementById("probeEnter");
-      const probeRetry = document.getElementById("probeRetry");
-      const probeClear = document.getElementById("probeClear");
-      const probeUseGlobal = document.getElementById("probeUseGlobal");
-      const probeUseMirror = document.getElementById("probeUseMirror");
       const flash = document.getElementById("flash");
       const controls = document.getElementById("controls");
       const zoomBar = document.getElementById("zoomBar");
@@ -1186,19 +992,6 @@
         }
       }
 
-      function probeRow(label, state, detail) {
-        const cls = state === "ok" ? "ok" : state === "warn" ? "warn" : "no";
-        return (
-          '<li><span class="label">' +
-          label +
-          '</span><span class="' +
-          cls +
-          '">' +
-          detail +
-          "</span></li>"
-        );
-      }
-
       async function checkWebGPU() {
         try {
           if (!navigator.gpu) return { ok: false, detail: "不支持 navigator.gpu" };
@@ -1233,73 +1026,39 @@
       async function checkModelHosts() {
         try {
           const engine = await import(coachAssetUrl("coach-engine.js"));
-          const pref =
-            engine.getHostPreference && engine.getHostPreference();
-
-          // 本地已下齐 → 不依赖外网模型源（仍尊重偏好）
+          // 始终自动选源，不暴露给用户
+          if (engine.switchToAutoSource) engine.switchToAutoSource();
           if (engine.findCachedModelHost) {
             const cached = await engine.findCachedModelHost();
             if (cached && cached.ok) {
               if (engine.setModelHost) engine.setModelHost(cached.host);
-              const label =
-                (engine.describeHost && engine.describeHost(cached.host)) ||
-                String(cached.host).replace(/^https?:\/\//, "");
               return {
                 ok: true,
-                detail: "本地已缓存 · " + label,
                 host: cached.host,
                 fromCache: true,
-                degraded: false,
-                pref: pref || "auto",
-                isMirror: /hf-mirror/i.test(cached.host),
-                isGlobal: /huggingface\.co/i.test(cached.host),
               };
             }
           }
           const probed = await engine.probeModelHosts();
           if (probed.ok) {
-            const label =
-              probed.label ||
-              (engine.describeHost && engine.describeHost(probed.host)) ||
-              probed.host.replace(/^https?:\/\//, "");
             return {
               ok: true,
-              detail: probed.degraded
-                ? "已降级 · " + label
-                : label,
               host: probed.host,
               fromCache: false,
               degraded: !!probed.degraded,
-              pref: pref || "auto",
-              isMirror: /hf-mirror/i.test(probed.host),
-              isGlobal: /huggingface\.co/i.test(probed.host),
             };
           }
-          const parts = (probed.results || []).map(function (r) {
-            return (
-              String(r.host).replace(/^https?:\/\//, "") + ":" + r.detail
-            );
-          });
           return {
             ok: false,
-            detail: parts.length ? parts.join("；") : "均失败",
             host: null,
             fromCache: false,
-            degraded: false,
-            pref: pref || "auto",
-            isMirror: false,
-            isGlobal: false,
           };
         } catch (err) {
           return {
             ok: false,
-            detail: (err && err.message) || "检测失败",
             host: null,
             fromCache: false,
-            degraded: false,
-            pref: "auto",
-            isMirror: false,
-            isGlobal: false,
+            detail: (err && err.message) || "检测失败",
           };
         }
       }
@@ -1372,43 +1131,27 @@
         gate.classList.remove("show");
         controls.classList.remove("show");
         probeEnter.hidden = true;
-        probeRetry.hidden = true;
-        probeClear.hidden = true;
-        probeUseGlobal.hidden = true;
-        probeUseMirror.hidden = true;
-        probeList.hidden = true;
-        probeNote.hidden = true;
-        probeStatus.textContent = "正在检测设备与依赖…";
+        probeStatus.textContent = "正在检测…";
 
         const httpsOk = isSecureEnough();
-
-        probeStatus.textContent = "检测摄像头…";
         const camera = await checkCameraDevice();
 
-        probeStatus.textContent = "检测 WebGPU…";
-        const gpu = await checkWebGPU();
+        // 静默检测辅助拍摄依赖与模型源（不展示细节给用户）
+        let gpu = { ok: false };
+        let tf = { ok: false };
+        let mirror = { ok: false, host: "" };
+        try {
+          gpu = await checkWebGPU();
+        } catch (_) {}
+        try {
+          tf = await checkTransformersCdn();
+        } catch (_) {}
+        try {
+          mirror = await checkModelHosts();
+        } catch (_) {}
 
-        probeStatus.textContent = "检测 Transformers.js CDN…";
-        const tf = await checkTransformersCdn();
-
-        probeStatus.textContent = "检测模型源（Hugging Face / hf-mirror）…";
-        const mirror = await checkModelHosts();
-
-        // 辅助拍摄：CDN +（本地缓存 或 任一模型源）
-        const assistOk = tf.ok && mirror.ok;
-        const assistDetail = !tf.ok
-          ? "引擎不可用：" + tf.detail
-          : !mirror.ok
-            ? "模型源不可用：" + mirror.detail
-            : mirror.fromCache
-              ? "可用（本地缓存 · " +
-                (gpu.ok ? "WebGPU" : "WASM") +
-                "）"
-              : gpu.ok
-                ? "可用（WebGPU · " + mirror.detail + "）"
-                : "可用（WASM · " + mirror.detail + "）";
-
-        const shootOk = httpsOk && camera.ok;
+        const assistOk = !!(tf.ok && mirror.ok);
+        const shootOk = !!(httpsOk && camera.ok);
 
         deviceReport = {
           https: httpsOk,
@@ -1420,202 +1163,13 @@
           hfMirror: mirror.ok,
           modelHost: mirror.host || "",
           assistOk: assistOk,
-          detail: assistDetail,
+          detail: assistOk ? "ok" : "assist unavailable",
         };
 
-        probeList.hidden = false;
-        probeList.innerHTML =
-          probeRow("HTTPS / 安全上下文", httpsOk ? "ok" : "no", httpsOk ? "通过" : "失败") +
-          probeRow(
-            "摄像头",
-            camera.ok ? "ok" : "no",
-            camera.detail
-          ) +
-          probeRow("WebGPU", gpu.ok ? "ok" : "warn", gpu.detail) +
-          probeRow("Transformers.js", tf.ok ? "ok" : "no", tf.detail) +
-          probeRow(
-            "模型源",
-            mirror.ok ? "ok" : "no",
-            mirror.detail
-          ) +
-          probeRow(
-            "辅助拍摄",
-            assistOk ? (gpu.ok ? "ok" : "warn") : "no",
-            assistDetail
-          );
-
-        probeNote.hidden = false;
-        if (!httpsOk) {
-          probeNote.textContent =
-            "需要 HTTPS（或 localhost）才能使用相机。请用 GitHub Pages 链接打开。";
-        } else if (!camera.ok) {
-          probeNote.textContent =
-            "当前环境无法打开摄像头（" +
-            camera.detail +
-            "）。请确认本机有摄像头、已授权浏览器权限，或换有摄像头的设备后再点「重新检测」。";
-        } else if (!assistOk) {
-          probeNote.textContent =
-            "当前环境无法使用「辅助拍摄」。国内可点「改用国内镜像」；海外/有代理可点「改用全球源」后重试。";
-        } else if (mirror.degraded || mirror.isMirror) {
-          probeNote.textContent =
-            (mirror.degraded
-              ? "Hugging Face 需代理，已自动改用国内镜像下载。"
-              : "当前使用国内镜像 (hf-mirror)。") +
-            (mirror.fromCache
-              ? "模型已在本地。"
-              : "首次仍需下载。") +
-            " 若你已有代理或在海外，可点「改用全球源」清除镜像缓存并改下 Hugging Face。";
-        } else if (mirror.fromCache) {
-          probeNote.textContent =
-            "本地已有视觉模型缓存（全球源），进入拍摄后点「辅助拍摄」将直接加载。国内网络不稳时可改用国内镜像。";
-        } else if (!gpu.ok) {
-          probeNote.textContent =
-            "无 WebGPU，辅助拍摄将尝试 WASM（首次下载大、偏慢）。下载中途刷新可自动续传。建议桌面 Chrome。";
-        } else {
-          probeNote.textContent =
-            "环境正常，将使用全球源 Hugging Face。国内访问失败时会自动降级 hf-mirror；也可手动切换。";
-        }
-
-        probeStatus.textContent = "检测完成";
+        probeStatus.textContent = shootOk ? "检测完成" : "当前无法使用相机";
         probeEnter.hidden = false;
-        probeRetry.hidden = false;
-        probeClear.hidden = false;
-        probeUseGlobal.hidden = false;
-        probeUseMirror.hidden = false;
         probeEnter.disabled = !shootOk;
-        probeEnter.textContent = shootOk ? "进入拍摄" : "环境不满足，无法拍摄";
-      }
-
-      async function clearBrowserCaches() {
-        const tasks = [];
-
-        try {
-          localStorage.removeItem("doyen_hf_host");
-          localStorage.removeItem("doyen_model_ready");
-          localStorage.removeItem("doyen_hf_pref");
-        } catch (_) {}
-        try {
-          if (typeof window !== "undefined") {
-            delete window.__DOYEN_HF_HOST__;
-          }
-        } catch (_) {}
-
-        // 清除断点续传半成品
-        try {
-          const resumeMod = await import(coachAssetUrl("resume-download.js"));
-          if (resumeMod && resumeMod.clearResumePartials) {
-            await resumeMod.clearResumePartials();
-          }
-        } catch (_) {}
-
-        if (typeof indexedDB !== "undefined") {
-          try {
-            indexedDB.deleteDatabase("doyen-resume-v1");
-          } catch (_) {}
-        }
-
-        if (typeof caches !== "undefined" && caches.keys) {
-          tasks.push(
-            caches.keys().then(function (keys) {
-              return Promise.all(
-                keys.map(function (key) {
-                  return caches.delete(key);
-                })
-              );
-            })
-          );
-        }
-
-        if (typeof indexedDB !== "undefined") {
-          if (indexedDB.databases) {
-            tasks.push(
-              indexedDB.databases().then(function (dbs) {
-                return Promise.all(
-                  (dbs || []).map(function (db) {
-                    const name = db && db.name;
-                    if (!name) return Promise.resolve();
-                    return new Promise(function (resolve) {
-                      const req = indexedDB.deleteDatabase(name);
-                      req.onsuccess = function () {
-                        resolve();
-                      };
-                      req.onerror = function () {
-                        resolve();
-                      };
-                      req.onblocked = function () {
-                        resolve();
-                      };
-                    });
-                  })
-                );
-              })
-            );
-          } else {
-            // Safari 旧版无 databases()：清常见 transformers 库名
-            [
-              "transformers-cache",
-              "transformersjs-cache",
-              "@huggingface/transformers",
-              "doyen-resume-v1",
-            ].forEach(function (name) {
-              tasks.push(
-                new Promise(function (resolve) {
-                  const req = indexedDB.deleteDatabase(name);
-                  req.onsuccess = function () {
-                    resolve();
-                  };
-                  req.onerror = function () {
-                    resolve();
-                  };
-                  req.onblocked = function () {
-                    resolve();
-                  };
-                })
-              );
-            });
-          }
-        }
-
-        await Promise.all(tasks);
-      }
-
-      async function onClearCache() {
-        const ok = window.confirm(
-          "清除本站模型缓存与相关本地数据？下载中断或页面崩溃后建议清除后重试。完成后会刷新页面。"
-        );
-        if (!ok) return;
-
-        if (probeClear) probeClear.disabled = true;
-        if (probeRetry) probeRetry.disabled = true;
-        if (probeEnter) probeEnter.disabled = true;
-        if (coachClear) coachClear.disabled = true;
-        if (probeStatus) probeStatus.textContent = "正在清除缓存…";
-        if (probeNote) {
-          probeNote.hidden = false;
-          probeNote.textContent = "清除 Cache Storage / IndexedDB / 模型源偏好…";
-        }
-        showToast("正在清除缓存…");
-
-        try {
-          await clearBrowserCaches();
-          if (probeStatus) probeStatus.textContent = "缓存已清除，即将刷新…";
-          showToast("缓存已清除", "ok");
-          setTimeout(function () {
-            location.reload();
-          }, 400);
-        } catch (err) {
-          if (probeClear) probeClear.disabled = false;
-          if (probeRetry) probeRetry.disabled = false;
-          if (probeEnter) probeEnter.disabled = false;
-          if (coachClear) coachClear.disabled = false;
-          if (probeStatus) probeStatus.textContent = "清除失败";
-          if (probeNote) {
-            probeNote.textContent =
-              (err && err.message) ||
-              "清除缓存失败，请手动清理浏览器站点数据后重试。";
-          }
-          showToast("清除缓存失败", "err");
-        }
+        probeEnter.textContent = shootOk ? "进入拍摄" : "无法进入拍摄";
       }
 
       async function startCamera() {
@@ -1644,9 +1198,12 @@
           // 辅助拍摄：检测通过才启用
           coachBtn.disabled = !(deviceReport && deviceReport.assistOk);
           if (deviceReport && !deviceReport.assistOk) {
-            coachBtn.title = deviceReport.detail || "当前环境不支持辅助拍摄";
+            coachBtn.title = "当前环境不支持辅助拍摄";
+            setCoachHint("");
           } else {
             coachBtn.title = "";
+            setCoachHint("");
+            setCoachBtnProgress(0);
           }
         } catch (err) {
           if (stream) {
@@ -1676,6 +1233,7 @@
             digitalScale = 1;
             updatePreviewTransform();
             updateFocalAvailability();
+            if (coachActive) stopSubjectTracking();
           } else {
             const presets = currentPresets();
             await applyZoomFactor(presets.defaultZoom);
@@ -1771,9 +1329,10 @@
 
       let coachReady = false;
       let coachLoading = false;
-      let coachRunning = false;
+      let coachActive = false;
+      let coachTracking = false;
       let coachEngine = null;
-      let coachTipsMod = null;
+      let coachDetectGen = 0;
 
       function coachAssetUrl(fileName) {
         const pathName = location.pathname || "/";
@@ -1784,83 +1343,19 @@
         } else {
           base = pathName + "/" + fileName;
         }
-        // bust browser module cache after deploy
-        return base + "?v=20260924-host";
+        return base + "?v=20260924-subject";
       }
 
-      function setCoachProgress(text, percentOrNull) {
-        coachProgress.classList.add("show");
-        coachProgressText.textContent = text || "";
-        const bar = document.getElementById("coachProgressBar");
-        if (typeof percentOrNull === "number" && !isNaN(percentOrNull)) {
-          bar.classList.remove("indeterminate");
-          const pct = Math.max(0, Math.min(100, percentOrNull));
-          coachProgressFill.style.width = pct.toFixed(1) + "%";
-        }
+      function setCoachHint(text) {
+        if (coachHint) coachHint.textContent = text || "";
       }
 
-      function setCoachIndeterminate(text) {
-        coachProgress.classList.add("show");
-        coachProgressText.textContent = text || "";
-        document
-          .getElementById("coachProgressBar")
-          .classList.add("indeterminate");
-      }
-
-      function hideCoachProgress() {
-        coachProgress.classList.remove("show");
-        document
-          .getElementById("coachProgressBar")
-          .classList.remove("indeterminate");
-        coachProgressFill.style.width = "0%";
-      }
-
-      function showCoachPanel() {
-        coachPanel.classList.add("show");
-      }
-
-      function hideCoachPanel() {
-        coachPanel.classList.remove("show");
-      }
-
-      function showCoachError(message) {
-        hideCoachProgress();
-        coachPanel.classList.add("show");
-        coachPanel.classList.add("err");
-        coachCaption.classList.add("err");
-        coachCaption.textContent = message || "辅助拍摄出错";
-        coachTips.innerHTML = "";
-        showToast(message || "辅助拍摄出错", "err");
-      }
-
-      function clearCoachErrorState() {
-        coachPanel.classList.remove("err");
-        coachCaption.classList.remove("err");
-      }
-
-      function renderCoachResult(payload) {
-        hideCoachProgress();
-        clearCoachErrorState();
-        const caption = (payload && payload.caption) || "";
-        const tips = (payload && payload.tips) || [];
-        const device = (payload && payload.device) || "";
-        coachCaption.textContent = caption
-          ? "镜头所见：" + caption
-          : "已分析当前画面";
-        if (device) {
-          coachCaption.textContent += "（" + device + "）";
-        }
-        coachTips.innerHTML = "";
-        tips.forEach(function (tip) {
-          const li = document.createElement("li");
-          li.textContent = tip;
-          coachTips.appendChild(li);
-        });
-        showCoachPanel();
+      function setCoachBtnProgress(pct) {
+        const p = Math.max(0, Math.min(100, Number(pct) || 0));
+        coachBtn.style.setProperty("--coach-progress", p.toFixed(1) + "%");
       }
 
       function createCoachDownloadTracker() {
-        // 预置已知体积，避免每开一个大文件总进度回跳
         const knownTotals = {
           "config.json": 5432,
           "tokenizer.json": 2297961,
@@ -1890,41 +1385,19 @@
           return files[key];
         }
 
-        function fileLabel(file) {
-          const name = String(file || "").split("/").pop() || "文件";
-          if (name.length > 22) return name.slice(0, 10) + "…" + name.slice(-8);
-          return name;
-        }
-
         function compute() {
           let loaded = 0;
           let total = 0;
-          let seen = 0;
           Object.keys(files).forEach(function (key) {
             const f = files[key];
-            seen += 1;
             const t = f.total > 0 ? f.total : f.done ? Math.max(f.loaded, 1) : 0;
             const l = f.done ? t || f.loaded : Math.min(f.loaded, t || f.loaded);
             loaded += l;
             total += t;
           });
-          let pct = 0;
-          if (total > 0) pct = (loaded / total) * 100;
-          else if (seen > 0) {
-            // 尚无体积信息时，按已完成文件数估一个很粗的进度
-            const doneCount = Object.keys(files).filter(function (k) {
-              return files[k].done;
-            }).length;
-            pct = (doneCount / Math.max(seen, 1)) * 100;
-          }
-          // 单调递增，避免新文件加入后百分比回退
+          let pct = total > 0 ? (loaded / total) * 100 : 0;
           if (pct > peakPct) peakPct = pct;
-          return {
-            pct: peakPct,
-            loaded: loaded,
-            total: total,
-            activeFile: activeFile,
-          };
+          return { pct: peakPct, loaded: loaded, total: total, activeFile: activeFile };
         }
 
         return {
@@ -1961,13 +1434,7 @@
             } else {
               return null;
             }
-            const snap = compute();
-            return {
-              pct: snap.pct,
-              label: fileLabel(snap.activeFile || file),
-              loaded: snap.loaded,
-              total: snap.total,
-            };
+            return compute();
           },
           finish: function () {
             peakPct = 100;
@@ -1978,18 +1445,8 @@
 
       let coachDownloadTracker = null;
 
-      function formatBytes(n) {
-        if (!n || n < 1) return "";
-        if (n < 1024) return n + " B";
-        if (n < 1024 * 1024) return (n / 1024).toFixed(0) + " KB";
-        return (n / (1024 * 1024)).toFixed(1) + " MB";
-      }
-
       function handleCoachProgress(msg) {
         if (!msg) return;
-        const fromCache = !!msg.fromCache;
-        const verb = fromCache ? "加载" : msg.resumed ? "继续下载" : "下载";
-
         if (
           msg.status === "initiate" ||
           msg.status === "download" ||
@@ -2001,200 +1458,233 @@
           }
           const snap = coachDownloadTracker.onEvent(msg);
           if (snap) {
-            const sizeText =
-              snap.total > 0
-                ? " · " + formatBytes(snap.loaded) + "/" + formatBytes(snap.total)
-                : "";
-            setCoachProgress(
-              verb +
-                " " +
-                Number(snap.pct).toFixed(0) +
-                "%" +
-                (snap.label ? " · " + snap.label : "") +
-                sizeText,
-              Number(snap.pct)
+            setCoachBtnProgress(snap.pct);
+            setCoachHint(
+              "下载资源 " + Number(snap.pct).toFixed(0) + "%"
             );
           }
           return;
         }
-
-        if (msg.status === "progress_total" && msg.progress != null) {
-          setCoachProgress(
-            verb + "模型 " + Number(msg.progress).toFixed(0) + "%",
-            Number(msg.progress)
-          );
-          return;
-        }
         if (msg.status === "loading" && msg.data) {
-          // 已有总进度时，不要被 indeterminate 文案打断跳动
-          if (coachDownloadTracker && !msg.resumed) return;
-          if (msg.resumed) {
-            setCoachIndeterminate(String(msg.data));
-            return;
+          if (!coachDownloadTracker) {
+            setCoachHint(String(msg.data));
           }
-          setCoachIndeterminate(String(msg.data));
         } else if (msg.status === "ready") {
           if (coachDownloadTracker) coachDownloadTracker.finish();
-          setCoachProgress(fromCache ? "本地模型就绪" : "模型就绪", 100);
+          setCoachBtnProgress(100);
+          setCoachHint("资源就绪");
           coachDownloadTracker = null;
         }
       }
 
       async function ensureCoachEngine() {
         if (coachEngine) return coachEngine;
-        setCoachIndeterminate("加载辅助拍摄引擎…");
-        try {
-          coachEngine = await import(coachAssetUrl("coach-engine.js"));
-          coachTipsMod = await import(coachAssetUrl("coach-tips.js"));
-          return coachEngine;
-        } catch (err) {
-          const detail = (err && err.message) || String(err);
-          throw new Error("引擎脚本加载失败：" + detail);
+        setCoachHint("加载引擎…");
+        coachEngine = await import(coachAssetUrl("coach-engine.js"));
+        return coachEngine;
+      }
+
+      function captureDetectCanvas() {
+        const vw = video.videoWidth;
+        const vh = video.videoHeight;
+        if (!vw || !vh) throw new Error("画面还没就绪");
+        const maxSide = 512;
+        const scale = Math.min(1, maxSide / Math.max(vw, vh));
+        const w = Math.max(1, Math.round(vw * scale));
+        const h = Math.max(1, Math.round(vh * scale));
+        const c = document.createElement("canvas");
+        c.width = w;
+        c.height = h;
+        const ctx = c.getContext("2d");
+        // 整帧缩略图检测；数字变焦由叠加层同步放大
+        ctx.drawImage(video, 0, 0, vw, vh, 0, 0, w, h);
+        return { canvas: c, srcW: w, srcH: h };
+      }
+
+      function clearSubjectOverlay() {
+        if (!subjectOverlay) return;
+        const ctx = subjectOverlay.getContext("2d");
+        if (!ctx) return;
+        const w = subjectOverlay.width;
+        const h = subjectOverlay.height;
+        ctx.clearRect(0, 0, w, h);
+      }
+
+      function sizeSubjectOverlay() {
+        if (!subjectOverlay) return;
+        const stageEl = document.getElementById("stage");
+        const w = stageEl.clientWidth || window.innerWidth || 1;
+        const h = stageEl.clientHeight || window.innerHeight || 1;
+        if (subjectOverlay.width !== w || subjectOverlay.height !== h) {
+          subjectOverlay.width = w;
+          subjectOverlay.height = h;
         }
       }
 
-      function frameToBlob() {
-        captureFrame();
-        return new Promise(function (resolve, reject) {
-          canvas.toBlob(
-            function (blob) {
-              if (!blob) reject(new Error("截取画面失败"));
-              else resolve(blob);
-            },
-            "image/jpeg",
-            0.85
-          );
-        });
+      function drawSubjectBox(bbox, srcW, srcH) {
+        sizeSubjectOverlay();
+        const ctx = subjectOverlay.getContext("2d");
+        if (!ctx || !bbox || bbox.length < 4) {
+          clearSubjectOverlay();
+          return;
+        }
+        const ow = subjectOverlay.width;
+        const oh = subjectOverlay.height;
+        // object-fit: cover 映射
+        const scale = Math.max(ow / srcW, oh / srcH);
+        const dw = srcW * scale;
+        const dh = srcH * scale;
+        const ox = (ow - dw) / 2;
+        const oy = (oh - dh) / 2;
+        let x1 = bbox[0] * scale + ox;
+        let y1 = bbox[1] * scale + oy;
+        let x2 = bbox[2] * scale + ox;
+        let y2 = bbox[3] * scale + oy;
+        if (facingMode === "user") {
+          // 预览已镜像，检测图画也镜像过，坐标已对齐；无需再翻
+        }
+        const x = Math.min(x1, x2);
+        const y = Math.min(y1, y2);
+        const bw = Math.abs(x2 - x1);
+        const bh = Math.abs(y2 - y1);
+
+        ctx.clearRect(0, 0, ow, oh);
+        ctx.save();
+        if (digitalScale > 1.01) {
+          ctx.translate(ow / 2, oh / 2);
+          ctx.scale(digitalScale, digitalScale);
+          ctx.translate(-ow / 2, -oh / 2);
+        }
+        ctx.strokeStyle = "#4ade80";
+        ctx.lineWidth = Math.max(2, Math.round(ow / 180)) / Math.max(digitalScale, 1);
+        ctx.shadowColor = "rgba(74, 222, 128, 0.55)";
+        ctx.shadowBlur = 8;
+        ctx.strokeRect(x, y, bw, bh);
+        ctx.shadowBlur = 0;
+        // 角标
+        const corner = Math.min(18, bw * 0.2, bh * 0.2);
+        ctx.beginPath();
+        ctx.moveTo(x, y + corner);
+        ctx.lineTo(x, y);
+        ctx.lineTo(x + corner, y);
+        ctx.moveTo(x + bw - corner, y);
+        ctx.lineTo(x + bw, y);
+        ctx.lineTo(x + bw, y + corner);
+        ctx.moveTo(x + bw, y + bh - corner);
+        ctx.lineTo(x + bw, y + bh);
+        ctx.lineTo(x + bw - corner, y + bh);
+        ctx.moveTo(x + corner, y + bh);
+        ctx.lineTo(x, y + bh);
+        ctx.lineTo(x, y + bh - corner);
+        ctx.stroke();
+        ctx.restore();
       }
 
-      async function runCoach() {
-        if (!stream || coachRunning) return;
+      function stopSubjectTracking() {
+        coachActive = false;
+        coachDetectGen += 1;
+        coachBtn.classList.remove("active");
+        clearSubjectOverlay();
+        if (coachReady && !coachLoading) setCoachHint("点击开启主体识别");
+      }
+
+      async function subjectTrackLoop(gen) {
+        while (coachActive && gen === coachDetectGen) {
+          if (!stream || document.hidden) {
+            await new Promise(function (r) { setTimeout(r, 400); });
+            continue;
+          }
+          try {
+            const snap = captureDetectCanvas();
+            const vision = await coachEngine.detectSubjects(snap.canvas);
+            if (!coachActive || gen !== coachDetectGen) break;
+            const subject = coachEngine.pickPrimarySubject(vision.objects || []);
+            if (subject && subject.bbox) {
+              // bbox 基于检测画布尺寸
+              drawSubjectBox(subject.bbox, snap.srcW, snap.srcH);
+              setCoachHint(subject.label ? "主体：" + subject.label : "已锁定主体");
+            } else {
+              clearSubjectOverlay();
+              setCoachHint("未找到主体");
+            }
+          } catch (err) {
+            if (!coachActive || gen !== coachDetectGen) break;
+            setCoachHint((err && err.message) || "识别失败");
+          }
+          // 镜头移动持续检测；给设备一点喘息
+          await new Promise(function (r) { setTimeout(r, 120); });
+        }
+        coachTracking = false;
+      }
+
+      async function ensureCoachModelLoaded() {
+        if (coachReady) return true;
+        if (coachLoading) return false;
+        coachLoading = true;
+        coachBtn.classList.add("loading");
+        coachBtn.classList.remove("active");
+        setCoachBtnProgress(0);
+        setCoachHint("下载资源…");
+        coachDownloadTracker = null;
+        try {
+          const engine = await ensureCoachEngine();
+          await engine.loadCoach(handleCoachProgress);
+          coachReady = true;
+          setCoachBtnProgress(100);
+          setCoachHint("点击开启主体识别");
+          return true;
+        } catch (err) {
+          setCoachHint((err && err.message) || "资源加载失败");
+          setCoachBtnProgress(0);
+          showToast((err && err.message) || "辅助拍摄资源加载失败", "err");
+          return false;
+        } finally {
+          coachLoading = false;
+          coachBtn.classList.remove("loading");
+        }
+      }
+
+      async function onCoachClick() {
+        if (!stream) return;
+        if (coachLoading) return; // 下载中不可再点
         if (deviceReport && !deviceReport.assistOk) {
-          showCoachError(
-            "当前环境不支持辅助拍摄：" +
-              (deviceReport.detail || "请用桌面 Chrome 打开后再试")
-          );
+          showToast("当前环境不支持辅助拍摄", "err");
           return;
         }
         if (facingMode === "user") {
           showToast("请切到后置镜头再使用辅助拍摄", "err");
           return;
         }
-        coachRunning = true;
-        coachBtn.disabled = true;
-        coachBtn.classList.add("busy");
-        showCoachPanel();
-        clearCoachErrorState();
-        coachCaption.textContent = "";
-        coachTips.innerHTML = "";
-        coachDownloadTracker = null;
-        setCoachIndeterminate("准备本地视觉模型…");
 
-        try {
-          const engine = await ensureCoachEngine();
-          if (!coachReady) {
-            if (coachLoading) {
-              throw new Error("模型正在加载，请稍候再试");
-            }
-            coachLoading = true;
-            await engine.loadCoach(handleCoachProgress);
-            coachReady = true;
-            coachLoading = false;
-          }
+        if (!coachReady) {
+          const ok = await ensureCoachModelLoaded();
+          if (!ok) return;
+          // 下载完成后不自动开启，等用户再点一次
+          return;
+        }
 
-          setCoachIndeterminate("正在看当前取景…");
-          const blob = await frameToBlob();
-          const vision = await engine.analyzeFrame(blob, handleCoachProgress);
-          const focal = findFocal(zoomFactor);
-          const built = coachTipsMod.buildCoachTips(vision, {
-            mode: shootMode,
-            focal: focal,
-          });
-          built.device = vision.device || engine.getCoachDevice();
-          renderCoachResult(built);
-        } catch (err) {
-          coachLoading = false;
-          showCoachError((err && err.message) || "指导失败");
-        } finally {
-          coachRunning = false;
-          coachBtn.classList.remove("busy");
-          coachBtn.disabled = false;
+        if (coachActive) {
+          stopSubjectTracking();
+          return;
+        }
+
+        coachActive = true;
+        coachBtn.classList.add("active");
+        setCoachHint("识别主体中…");
+        sizeSubjectOverlay();
+        const gen = ++coachDetectGen;
+        if (!coachTracking) {
+          coachTracking = true;
+          subjectTrackLoop(gen);
         }
       }
 
-      coachBtn.addEventListener("click", runCoach);
-      coachClose.addEventListener("click", hideCoachPanel);
-      coachClear.addEventListener("click", onClearCache);
-
+      coachBtn.addEventListener("click", onCoachClick);
 
       gate.addEventListener("click", startCamera);
       probeEnter.addEventListener("click", function () {
         if (probeEnter.disabled) return;
         startCamera();
-      });
-      probeRetry.addEventListener("click", function () {
-        runDeviceProbe();
-      });
-      probeClear.addEventListener("click", onClearCache);
-
-      async function onSwitchSource(kind) {
-        const btn = kind === "global" ? probeUseGlobal : probeUseMirror;
-        if (btn) btn.disabled = true;
-        if (probeClear) probeClear.disabled = true;
-        if (probeRetry) probeRetry.disabled = true;
-        if (probeEnter) probeEnter.disabled = true;
-
-        const tip =
-          kind === "global"
-            ? "将清除国内镜像缓存，并改用 Hugging Face 全球源。需代理或海外网络。继续？"
-            : "将清除全球源缓存，并改用国内镜像 hf-mirror。继续？";
-        if (!window.confirm(tip)) {
-          if (btn) btn.disabled = false;
-          if (probeClear) probeClear.disabled = false;
-          if (probeRetry) probeRetry.disabled = false;
-          if (probeEnter) probeEnter.disabled = false;
-          return;
-        }
-
-        probeStatus.textContent =
-          kind === "global" ? "正在切换到全球源…" : "正在切换到国内镜像…";
-        try {
-          const engine = await import(coachAssetUrl("coach-engine.js"));
-          if (kind === "global") {
-            const res = await engine.switchToGlobalSource();
-            showToast(
-              "已切全球源，清除镜像文件 " +
-                (res.clearedMirrorFiles || 0) +
-                " 个",
-              "ok"
-            );
-          } else {
-            const res = await engine.switchToMirrorSource();
-            showToast(
-              "已切国内镜像，清除全球源文件 " +
-                (res.clearedGlobalFiles || 0) +
-                " 个",
-              "ok"
-            );
-          }
-          // 切源后重置页面内 coach 状态
-          coachReady = false;
-          coachLoading = false;
-          coachEngine = null;
-          await runDeviceProbe();
-        } catch (err) {
-          showToast((err && err.message) || "切换失败", "err");
-          if (btn) btn.disabled = false;
-          if (probeClear) probeClear.disabled = false;
-          if (probeRetry) probeRetry.disabled = false;
-        }
-      }
-
-      probeUseGlobal.addEventListener("click", function () {
-        onSwitchSource("global");
-      });
-      probeUseMirror.addEventListener("click", function () {
-        onSwitchSource("mirror");
       });
       shutter.addEventListener("click", onShutter);
       flipBtn.addEventListener("click", flipCamera);
@@ -2219,6 +1709,7 @@
       });
       window.addEventListener("resize", function () {
         layoutVideos();
+        if (coachActive) sizeSubjectOverlay();
       });
       window.addEventListener("orientationchange", function () {
         setTimeout(layoutVideos, 120);
