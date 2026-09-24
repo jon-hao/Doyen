@@ -17,7 +17,7 @@ import {
   hasIncompleteDownloads,
   estimateResumeProgress,
   flushActiveDownloads,
-} from "./resume-download.js?v=20260924-resume2";
+} from "./resume-download.js?v=20260924-hintfix";
 
 env.allowLocalModels = false;
 env.useBrowserCache = true;
@@ -291,35 +291,60 @@ export function readModelReadyFlag() {
   }
 }
 
+function isLikelyChinaNetwork() {
+  try {
+    if (typeof navigator !== "undefined") {
+      const lang = String(navigator.language || "").toLowerCase();
+      if (lang.indexOf("zh") === 0) return true;
+    }
+    if (typeof Intl !== "undefined" && Intl.DateTimeFormat) {
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+      if (
+        /Shanghai|Chongqing|Harbin|Urumqi|Hong_Kong|Macau|Taipei/i.test(tz)
+      ) {
+        return true;
+      }
+    }
+  } catch (_) {}
+  return false;
+}
+
 /**
  * 探测哪个模型源可从当前浏览器 CORS 访问
  * @param {string} host
  * @param {number} [timeoutMs]
  */
 async function probeSingleHost(host, timeoutMs) {
-  const ms = typeof timeoutMs === "number" ? timeoutMs : 8000;
-  const ctrl =
-    typeof AbortController !== "undefined" ? new AbortController() : null;
-  const timer = ctrl
-    ? setTimeout(function () {
-        ctrl.abort();
-      }, ms)
-    : null;
-  try {
-    const url =
-      normalizeHost(host) + "/" + MODEL_ID + "/resolve/main/config.json";
-    const res = await fetch(url, {
-      method: "GET",
-      mode: "cors",
-      cache: "no-store",
-      signal: ctrl ? ctrl.signal : undefined,
-    });
-    if (timer) clearTimeout(timer);
-    return !!(res && res.ok);
-  } catch (_) {
-    if (timer) clearTimeout(timer);
-    return false;
+  const ms = typeof timeoutMs === "number" ? timeoutMs : 12000;
+  const base = normalizeHost(host);
+  const urls = [
+    base + "/" + MODEL_ID + "/resolve/main/config.json",
+    base + "/api/models/" + MODEL_ID + "/tree/main",
+  ];
+
+  for (let u = 0; u < urls.length; u++) {
+    const ctrl =
+      typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timer = ctrl
+      ? setTimeout(function () {
+          ctrl.abort();
+        }, ms)
+      : null;
+    try {
+      const res = await fetch(urls[u], {
+        method: "GET",
+        mode: "cors",
+        credentials: "omit",
+        cache: "no-store",
+        signal: ctrl ? ctrl.signal : undefined,
+      });
+      if (timer) clearTimeout(timer);
+      if (res && res.ok) return true;
+    } catch (_) {
+      if (timer) clearTimeout(timer);
+    }
   }
+  return false;
 }
 
 function buildProbeOrder() {
@@ -339,39 +364,43 @@ function buildProbeOrder() {
   } else if (pref === "global") {
     push(GLOBAL_HOST);
     push(MIRROR_HOST);
-  } else {
-    // auto：先快速试全球源，不通立刻降级国内镜像
-    push(GLOBAL_HOST);
+  } else if (isLikelyChinaNetwork()) {
+    // 国内网络：优先镜像，避免卡在 huggingface
     push(MIRROR_HOST);
-    // 若上次成功是镜像，也确保镜像在列表里（已有）
     push(saved);
+    push(GLOBAL_HOST);
+  } else {
+    push(GLOBAL_HOST);
+    push(saved);
+    push(MIRROR_HOST);
   }
   return order;
 }
 
 /**
- * 探测可用模型源。auto 模式下 Hugging Face 仅给短超时，失败则降级 hf-mirror。
+ * 探测可用模型源。国内优先 hf-mirror；海外优先 Hugging Face。
  */
 export async function probeModelHosts(onProgress) {
   const order = buildProbeOrder();
   const pref = getHostPreference();
   const results = [];
+  const china = isLikelyChinaNetwork();
 
   for (let i = 0; i < order.length; i++) {
     const host = order[i];
     const isGlobal = isGlobalHost(host);
-    // 全球源在 auto 下用短超时，避免国内傻等
+    // 给足超时；国内试全球源时用短超时快速跳过
     const timeoutMs =
-      pref === "auto" && isGlobal ? 3500 : isGlobal ? 8000 : 8000;
+      pref === "auto" && china && isGlobal
+        ? 4000
+        : pref === "auto" && !china && isMirrorHost(host)
+          ? 4000
+          : 12000;
 
     if (onProgress) {
       onProgress({
         status: "loading",
-        data:
-          "探测 " +
-          hostLabel(host) +
-          (pref === "auto" && isGlobal ? "（超时将用国内镜像）" : "") +
-          "…",
+        data: "探测 " + hostLabel(host) + "…",
       });
     }
 
@@ -379,7 +408,8 @@ export async function probeModelHosts(onProgress) {
     if (ok) {
       results.push({ host: host, ok: true, detail: "可访问" });
       setModelHost(host);
-      const degraded = pref === "auto" && isMirrorHost(host) && isGlobalHost(order[0]);
+      const degraded =
+        pref === "auto" && isMirrorHost(host) && !china;
       return {
         ok: true,
         host: host,
@@ -391,7 +421,7 @@ export async function probeModelHosts(onProgress) {
     results.push({
       host: host,
       ok: false,
-      detail: isGlobal && pref === "auto" ? "超时/不可达，将降级" : "不可用",
+      detail: "不可用",
     });
   }
   return { ok: false, host: null, results: results, degraded: false };
@@ -628,22 +658,28 @@ export async function loadCoach(onProgress, options) {
         fromCache: true,
       });
     } else {
-      // 无完整缓存：探测可用源；HF 不通时自动降级国内镜像
+      // 无完整缓存：探测可用源；探测失败时仍按优先级尝试下载
       notify(onProgress, { status: "loading", data: "选择可用模型源…" });
-      const hostProbe = await probeModelHosts(onProgress);
+      let hostProbe = await probeModelHosts(onProgress);
       if (!hostProbe.ok) {
-        throw new Error(
-          "无法访问模型源（Hugging Face / hf-mirror 均失败）。国内可改用镜像；海外请开代理后点「改用全球源」。"
-        );
+        // 探测偶发失败时，仍按地区优先级硬试，避免误报「均不可用」
+        const fallbackHost = isLikelyChinaNetwork()
+          ? MIRROR_HOST
+          : GLOBAL_HOST;
+        setModelHost(fallbackHost);
+        hostProbe = {
+          ok: true,
+          host: fallbackHost,
+          degraded: false,
+          label: hostLabel(fallbackHost),
+          optimistic: true,
+        };
+      } else {
+        setModelHost(hostProbe.host);
       }
-      setModelHost(hostProbe.host);
       notify(onProgress, {
         status: "loading",
-        data: hostProbe.degraded
-          ? "Hugging Face 不可达，已降级 " +
-            hostProbe.label +
-            "（首次需下载）"
-          : "使用" + hostProbe.label + "（首次需下载）",
+        data: "使用" + hostProbe.label,
       });
     }
 
@@ -753,6 +789,27 @@ export async function loadCoach(onProgress, options) {
         data: "本地缓存不完整，改为联网下载…",
       });
       return loadCoach(onProgress, { forceRemote: true });
+    }
+
+    // 当前源下载失败时，自动换另一源再试一次
+    if (!opts.switchedHost && !fromCache) {
+      const cur = normalizeHost(env.remoteHost);
+      const alt = isMirrorHost(cur) ? GLOBAL_HOST : MIRROR_HOST;
+      processorPromise = null;
+      tokenizerPromise = null;
+      modelPromise = null;
+      warmed = false;
+      deviceUsed = null;
+      setModelHost(alt);
+      setHostPreference(isMirrorHost(alt) ? "mirror" : "global");
+      notify(onProgress, {
+        status: "loading",
+        data: "切换到" + hostLabel(alt) + "重试…",
+      });
+      return loadCoach(onProgress, {
+        forceRemote: true,
+        switchedHost: true,
+      });
     }
 
     processorPromise = null;

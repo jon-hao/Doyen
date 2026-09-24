@@ -1290,7 +1290,7 @@
         } catch (_) {}
         setProbeProgress(96, false);
 
-        const assistOk = !!(tf.ok && mirror.ok);
+        const assistOk = !!tf.ok; // 模型源在真正下载时再选，避免探测误杀
         const shootOk = !!(httpsOk && camera.ok);
 
         deviceReport = {
@@ -1486,7 +1486,7 @@
         } else {
           base = pathName + "/" + fileName;
         }
-        return base + "?v=20260924-resume2";
+        return base + "?v=20260924-hintfix";
       }
 
       function setCoachHint(text) {
@@ -1590,8 +1590,6 @@
 
       function handleCoachProgress(msg) {
         if (!msg) return;
-        const resumed = !!msg.resumed;
-        const verb = resumed ? "继续下载" : "下载资源";
         if (
           msg.status === "initiate" ||
           msg.status === "download" ||
@@ -1604,25 +1602,22 @@
           const snap = coachDownloadTracker.onEvent(msg);
           if (snap) {
             setCoachBtnProgress(snap.pct);
-            setCoachHint(verb + " " + Number(snap.pct).toFixed(0) + "%");
+            // 仅下载中展示小字
+            setCoachHint("下载资源 " + Number(snap.pct).toFixed(0) + "%");
           }
           return;
         }
-        if (msg.status === "loading" && msg.data) {
-          if (!coachDownloadTracker || resumed) {
-            setCoachHint(String(msg.data));
-          }
-        } else if (msg.status === "ready") {
+        if (msg.status === "ready") {
           if (coachDownloadTracker) coachDownloadTracker.finish();
           setCoachBtnProgress(100);
-          setCoachHint("资源就绪");
+          setCoachHint("");
           coachDownloadTracker = null;
         }
+        // 其余 loading 文案不展示
       }
 
       async function ensureCoachEngine() {
         if (coachEngine) return coachEngine;
-        setCoachHint("加载引擎…");
         coachEngine = await import(coachAssetUrl("coach-engine.js"));
         return coachEngine;
       }
@@ -1635,79 +1630,44 @@
         coachBtn.classList.remove("active");
         coachDownloadTracker = null;
 
-        let stopResumeListen = null;
         try {
           const engine = await ensureCoachEngine();
 
-          // 有半成品则从估算进度起步，并提示继续下载
           let startPct = 0;
-          let continuing = false;
           try {
             if (engine.estimateResumeProgress) {
               const est = await engine.estimateResumeProgress();
-              if (est && est.files > 0 && est.pct > 0) {
-                startPct = est.pct;
-                continuing = true;
-              }
-            } else if (engine.hasIncompleteDownloads) {
-              continuing = await engine.hasIncompleteDownloads();
+              if (est && est.files > 0 && est.pct > 0) startPct = est.pct;
             }
           } catch (_) {}
 
           setCoachBtnProgress(startPct);
           setCoachHint(
-            continuing
-              ? "继续下载 " + Number(startPct).toFixed(0) + "%"
-              : "下载资源…"
+            startPct > 0
+              ? "下载资源 " + Number(startPct).toFixed(0) + "%"
+              : "下载资源 0%"
           );
-
-          if (engine.onResumeProgress) {
-            stopResumeListen = engine.onResumeProgress(function (info) {
-              if (!info) return;
-              if (info.status === "resume" || info.status === "persist") {
-                if (info.total > 0 && info.loaded >= 0) {
-                  // 单文件进度仅作提示；总进度仍由 hf-progress 汇总
-                  setCoachHint(
-                    "继续下载 " +
-                      (info.file ? info.file + " " : "") +
-                      Math.min(
-                        99,
-                        Math.round((info.loaded / info.total) * 100)
-                      ) +
-                      "%"
-                  );
-                } else {
-                  setCoachHint("继续下载…");
-                }
-              }
-            });
-          }
 
           await engine.loadCoach(handleCoachProgress);
           coachReady = true;
-          setCoachBtnProgress(100);
-          setCoachHint("点击开启主体识别");
+          setCoachBtnProgress(0);
+          setCoachHint("");
           return true;
         } catch (err) {
-          // 中断也尽量落盘，下次可续传
           try {
             if (coachEngine && coachEngine.flushActiveDownloads) {
               await coachEngine.flushActiveDownloads();
             }
           } catch (_) {}
+          setCoachBtnProgress(0);
+          setCoachHint("");
           const msg = (err && err.message) || "资源加载失败";
           const paused =
             (err && err.name === "AbortError") ||
             /abort|network|Failed to fetch|interrupted|中断/i.test(msg);
-          setCoachHint(paused ? "下载已暂停，再次点击可继续" : msg);
           showToast(paused ? "下载已暂停，再次点击可继续" : msg, "err");
           return false;
         } finally {
-          if (typeof stopResumeListen === "function") {
-            try {
-              stopResumeListen();
-            } catch (_) {}
-          }
           coachLoading = false;
           coachBtn.classList.remove("loading");
         }
@@ -1725,7 +1685,6 @@
           }
           // 本地未就绪时，只要之前点过下载留下了半成品就自动续传
           if (incomplete) {
-            setCoachHint("继续下载未完成资源…");
             await ensureCoachModelLoaded();
           }
         } catch (_) {}
@@ -1832,7 +1791,7 @@
         coachDetectGen += 1;
         coachBtn.classList.remove("active");
         clearSubjectOverlay();
-        if (coachReady && !coachLoading) setCoachHint("点击开启主体识别");
+        setCoachHint("");
       }
 
       async function subjectTrackLoop(gen) {
@@ -1849,14 +1808,12 @@
             if (subject && subject.bbox) {
               // bbox 基于检测画布尺寸
               drawSubjectBox(subject.bbox, snap.srcW, snap.srcH);
-              setCoachHint(subject.label ? "主体：" + subject.label : "已锁定主体");
+              // 识别中不展示小字
             } else {
               clearSubjectOverlay();
-              setCoachHint("未找到主体");
             }
           } catch (err) {
             if (!coachActive || gen !== coachDetectGen) break;
-            setCoachHint((err && err.message) || "识别失败");
           }
           // 镜头移动持续检测；给设备一点喘息
           await new Promise(function (r) { setTimeout(r, 120); });
@@ -1890,7 +1847,7 @@
 
         coachActive = true;
         coachBtn.classList.add("active");
-        setCoachHint("识别主体中…");
+        setCoachHint("");
         sizeSubjectOverlay();
         const gen = ++coachDetectGen;
         if (!coachTracking) {
