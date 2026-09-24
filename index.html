@@ -1163,15 +1163,15 @@
         }
       }
 
-      async function checkTransformersCdn() {
+      async function checkAssistRuntime() {
         try {
           const mod = await import(
-            "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.1/+esm"
+            "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/+esm"
           );
-          if (!mod || !mod.env) {
+          if (!mod || !mod.ObjectDetector || !mod.FilesetResolver) {
             return { ok: false, detail: "模块不完整" };
           }
-          return { ok: true, detail: "CDN 可加载" };
+          return { ok: true, detail: "轻量检测可用" };
         } catch (err) {
           return {
             ok: false,
@@ -1181,43 +1181,12 @@
       }
 
       async function checkModelHosts() {
-        try {
-          const engine = await import(coachAssetUrl("coach-engine.js"));
-          // 始终自动选源，不暴露给用户
-          if (engine.switchToAutoSource) engine.switchToAutoSource();
-          if (engine.findCachedModelHost) {
-            const cached = await engine.findCachedModelHost();
-            if (cached && cached.ok) {
-              if (engine.setModelHost) engine.setModelHost(cached.host);
-              return {
-                ok: true,
-                host: cached.host,
-                fromCache: true,
-              };
-            }
-          }
-          const probed = await engine.probeModelHosts();
-          if (probed.ok) {
-            return {
-              ok: true,
-              host: probed.host,
-              fromCache: false,
-              degraded: !!probed.degraded,
-            };
-          }
-          return {
-            ok: false,
-            host: null,
-            fromCache: false,
-          };
-        } catch (err) {
-          return {
-            ok: false,
-            host: null,
-            fromCache: false,
-            detail: (err && err.message) || "检测失败",
-          };
-        }
+        // 轻量模型托管在本站 /models，不再依赖 HF
+        return {
+          ok: true,
+          host: "local",
+          fromCache: true,
+        };
       }
 
       function cameraProbeDetail(err) {
@@ -1388,7 +1357,7 @@
         } catch (_) {}
         setProbeProgress(74, false);
         try {
-          tf = await checkTransformersCdn();
+          tf = await checkAssistRuntime();
         } catch (_) {}
         setProbeProgress(86, false);
         try {
@@ -1396,7 +1365,7 @@
         } catch (_) {}
         setProbeProgress(96, false);
 
-        const assistOk = !!tf.ok; // 模型源在真正下载时再选，避免探测误杀
+        const assistOk = !!tf.ok; // 轻量 MediaPipe 可加载即可
         const shootOk = !!(httpsOk && camera.ok);
 
         deviceReport = {
@@ -1592,7 +1561,7 @@
         } else {
           base = pathName + "/" + fileName;
         }
-        return base + "?v=20260924-loadfix1";
+        return base + "?v=20260924-lite1";
       }
 
       function setCoachHint(text) {
@@ -1606,17 +1575,7 @@
 
       function createCoachDownloadTracker() {
         const knownTotals = {
-          "config.json": 5432,
-          "tokenizer.json": 2297961,
-          "tokenizer_config.json": 197658,
-          "preprocessor_config.json": 2673,
-          "generation_config.json": 4096,
-          "onnx/decoder_model_merged_q4.onnx": 64393474,
-          "onnx/encoder_model_q4.onnx": 30058778,
-          "onnx/embed_tokens_fp16.onnx": 78780290,
-          "onnx/embed_tokens.onnx": 157560044,
-          "onnx/vision_encoder_fp16.onnx": 183930536,
-          "onnx/vision_encoder.onnx": 366549825,
+          "efficientdet_lite0.tflite": 7244197,
         };
         const files = Object.create(null);
         let peakPct = 0;
@@ -1627,12 +1586,7 @@
           if (!f) return "file";
           if (knownTotals[f]) return f;
           const base = f.split("/").pop();
-          const keys = Object.keys(knownTotals);
-          for (let i = 0; i < keys.length; i++) {
-            const key = keys[i];
-            if (key === base || key.endsWith("/" + base)) return key;
-          }
-          if (base && /\.onnx$/i.test(base)) return "onnx/" + base;
+          if (knownTotals[base]) return base;
           return f;
         }
 
@@ -1648,16 +1602,7 @@
           return { key: key, entry: files[key] };
         }
 
-        // 预登记本项目实际会拉的文件，百分比按整包体积涨
-        [
-          "tokenizer.json",
-          "onnx/decoder_model_merged_q4.onnx",
-          "onnx/encoder_model_q4.onnx",
-          "onnx/embed_tokens_fp16.onnx",
-          "onnx/vision_encoder_fp16.onnx",
-        ].forEach(function (key) {
-          ensureFile(key);
-        });
+        ensureFile("efficientdet_lite0.tflite");
 
         function compute() {
           let loaded = 0;
@@ -1828,13 +1773,12 @@
             (err && err.name === "AbortError") ||
             /abort|interrupted|中断/i.test(raw);
           let msg = raw || "资源加载失败";
-          if (/Load failed|引擎启动失败|module script failed/i.test(raw)) {
-            msg =
-              "模型引擎启动失败，请关闭其他标签页后重试（iPhone 上较吃内存）";
+          if (/Load failed|引擎启动失败|module script failed|轻量模型加载失败/i.test(raw)) {
+            msg = "检测引擎加载失败，请检查网络后重试";
           } else if (/Failed to fetch|NetworkError|network/i.test(raw)) {
-            msg = "网络中断，再次点击可继续下载";
-          } else if (/not found locally|allowRemoteModels/i.test(raw)) {
-            msg = "本地缓存不完整，请再点一次重新下载";
+            msg = "网络中断，再次点击可继续";
+          } else if (/memory|OOM|Allocation|内存/i.test(raw)) {
+            msg = "内存不足，请关闭其他标签页后重试";
           }
           showToast(paused ? "下载已暂停，再次点击可继续" : msg, "err");
           return false;
@@ -1873,7 +1817,7 @@
         const vw = video.videoWidth;
         const vh = video.videoHeight;
         if (!vw || !vh) throw new Error("画面还没就绪");
-        const maxSide = 512;
+        const maxSide = 320;
         const scale = Math.min(1, maxSide / Math.max(vw, vh));
         const w = Math.max(1, Math.round(vw * scale));
         const h = Math.max(1, Math.round(vh * scale));
