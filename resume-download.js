@@ -1,18 +1,21 @@
 /**
  * 浏览器端模型断点续传：
  * - 完整文件仍由 Transformers.js 写入 Cache API
- * - 未下完的大文件进度写入 IndexedDB，刷新后用 HTTP Range 续传
- * - 通过临时劫持 fetch，对 HF / hf-mirror 的 resolve URL 生效
+ * - 未下完的大文件进度写入 IndexedDB，中断/刷新后用 HTTP Range 续传
+ * - 劫持 fetch，对 HF / hf-mirror 的 resolve URL 生效
  */
 
 const DB_NAME = "doyen-resume-v1";
 const STORE = "partials";
-const PERSIST_EVERY = 1024 * 1024; // 每累计 1MB 落盘，刷新最多丢约 1MB
-const MIN_RESUME_BYTES = 128 * 1024; // 小于此体积不走续传
+const PERSIST_EVERY = 256 * 1024; // 每 256KB 落盘
+const MIN_RESUME_BYTES = 64 * 1024;
 
 let installed = false;
 let nativeFetch = null;
 let resumeListeners = [];
+/** @type {Map<string, { flush: () => Promise<void> }>} */
+const activeDownloads = new Map();
+let lifecycleBound = false;
 
 function notifyResume(info) {
   resumeListeners.forEach(function (fn) {
@@ -69,7 +72,9 @@ async function getPartial(url) {
   try {
     const db = await openDb();
     try {
-      return await idbReq(db.transaction(STORE, "readonly").objectStore(STORE).get(url));
+      return await idbReq(
+        db.transaction(STORE, "readonly").objectStore(STORE).get(url)
+      );
     } finally {
       db.close();
     }
@@ -117,7 +122,6 @@ export async function clearResumePartials() {
       db.close();
     }
   } catch (_) {
-    // 兜底：直接删库
     try {
       indexedDB.deleteDatabase(DB_NAME);
     } catch (_) {}
@@ -149,6 +153,64 @@ export async function listResumePartials() {
   }
 }
 
+/** 是否有未下完的半成品 */
+export async function hasIncompleteDownloads() {
+  const rows = await listResumePartials();
+  return rows.some(function (r) {
+    return r && r.size > 0 && (!r.total || r.size < r.total);
+  });
+}
+
+/**
+ * 估算续传总进度（已知体积的半成品）
+ * @returns {Promise<{pct:number, loaded:number, total:number, files:number}>}
+ */
+export async function estimateResumeProgress() {
+  const rows = await listResumePartials();
+  let loaded = 0;
+  let total = 0;
+  let files = 0;
+  rows.forEach(function (r) {
+    if (!r || !r.size) return;
+    files += 1;
+    loaded += r.size;
+    total += r.total > 0 ? r.total : r.size;
+  });
+  const pct = total > 0 ? Math.min(99, (loaded / total) * 100) : 0;
+  return { pct: pct, loaded: loaded, total: total, files: files };
+}
+
+/** 把进行中的下载立刻落盘（切后台 / 刷新前调用） */
+export async function flushActiveDownloads() {
+  const tasks = [];
+  activeDownloads.forEach(function (entry) {
+    if (entry && typeof entry.flush === "function") {
+      tasks.push(
+        Promise.resolve()
+          .then(function () {
+            return entry.flush();
+          })
+          .catch(function () {})
+      );
+    }
+  });
+  if (!tasks.length) return;
+  await Promise.all(tasks);
+}
+
+function bindLifecycleFlush() {
+  if (lifecycleBound || typeof window === "undefined") return;
+  lifecycleBound = true;
+  const kick = function () {
+    flushActiveDownloads().catch(function () {});
+  };
+  window.addEventListener("pagehide", kick);
+  window.addEventListener("beforeunload", kick);
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "hidden") kick();
+  });
+}
+
 function requestUrl(input) {
   if (typeof input === "string") return input;
   if (input && typeof input.url === "string") return input.url;
@@ -163,7 +225,6 @@ function isResumableModelUrl(url) {
   if (!url || url.indexOf("http") !== 0) return false;
   if (!/huggingface\.co|hf-mirror\.com/i.test(url)) return false;
   if (!/\/resolve\//i.test(url)) return false;
-  // 小配置文件走原样；大权重 / tokenizer 续传
   if (/\.onnx(\?|$)/i.test(url)) return true;
   if (/tokenizer\.json(\?|$)/i.test(url)) return true;
   if (/tokenizer_config\.json(\?|$)/i.test(url)) return true;
@@ -202,9 +263,8 @@ function wrapResumableResponse(url, networkRes, start, partialBlob, meta) {
   let pendingSize = 0;
   let loaded = start;
   let persistChain = Promise.resolve();
-  let finished = false;
 
-  function queuePending(force) {
+  function flushPending(force) {
     if (!pending.length) return persistChain;
     if (!force && pendingSize < PERSIST_EVERY) return persistChain;
     const chunkBlob = new Blob(pending);
@@ -215,7 +275,6 @@ function wrapResumableResponse(url, networkRes, start, partialBlob, meta) {
     const sizeNow = snapshot.size;
     persistChain = persistChain
       .then(function () {
-        if (finished) return;
         return putPartial({
           url: url,
           etag: etag,
@@ -238,6 +297,12 @@ function wrapResumableResponse(url, networkRes, start, partialBlob, meta) {
     return persistChain;
   }
 
+  activeDownloads.set(url, {
+    flush: function () {
+      return flushPending(true);
+    },
+  });
+
   const stream = new ReadableStream({
     start: function (controller) {
       (async function () {
@@ -251,7 +316,6 @@ function wrapResumableResponse(url, networkRes, start, partialBlob, meta) {
               resumed: true,
               status: "resume",
             });
-            // 尽快把已有字节推给 Transformers 进度条
             const reader0 = partialBlob.stream().getReader();
             for (;;) {
               const chunk = await reader0.read();
@@ -278,8 +342,8 @@ function wrapResumableResponse(url, networkRes, start, partialBlob, meta) {
           }
 
           await flushPending(true);
-          finished = true;
           await deletePartial(url);
+          activeDownloads.delete(url);
           notifyResume({
             url: url,
             file: fileNameFromUrl(url),
@@ -293,13 +357,15 @@ function wrapResumableResponse(url, networkRes, start, partialBlob, meta) {
           try {
             await flushPending(true);
           } catch (_) {}
+          activeDownloads.delete(url);
           controller.error(err);
         }
       })();
     },
     cancel: function () {
-      finished = false;
-      return flushPending(true);
+      return flushPending(true).then(function () {
+        activeDownloads.delete(url);
+      });
     },
   });
 
@@ -321,12 +387,10 @@ async function resumableFetch(url, init, fetchImpl) {
     return fetchImpl(url, init);
   }
 
-  // 已有完整 Cache 时 Transformers 不会走到 fetch；此处只处理未缓存文件
   let partial = await getPartial(url);
   let start =
     partial && partial.blob && partial.blob.size > 0 ? partial.blob.size : 0;
 
-  // etag 变化则丢弃半成品
   const headers = new Headers((init && init.headers) || {});
   if (start > 0) {
     headers.set("Range", "bytes=" + start + "-");
@@ -335,9 +399,11 @@ async function resumableFetch(url, init, fetchImpl) {
     }
   }
 
-  const networkRes = await fetchImpl(url, Object.assign({}, init || {}, { headers: headers }));
+  const networkRes = await fetchImpl(
+    url,
+    Object.assign({}, init || {}, { headers: headers })
+  );
 
-  // 服务器忽略 Range → 整包重下
   if (start > 0 && networkRes.status === 200) {
     await deletePartial(url);
     partial = null;
@@ -365,12 +431,10 @@ async function resumableFetch(url, init, fetchImpl) {
     total = parseInt(networkRes.headers.get("Content-Length") || "0", 10) || 0;
   }
 
-  // 太小的文件不值得续传开销
   if (total > 0 && total < MIN_RESUME_BYTES && start === 0) {
     return networkRes;
   }
 
-  // 半成品与新 total 对不上则重来
   if (start > 0 && total > 0 && start >= total) {
     await deletePartial(url);
     return fetchImpl(url, init);
@@ -408,6 +472,7 @@ export function installResumableFetch() {
     return resumableFetch(url, init, nativeFetch);
   };
   installed = true;
+  bindLifecycleFlush();
   return function uninstall() {
     if (!installed) return;
     if (nativeFetch) window.fetch = nativeFetch;

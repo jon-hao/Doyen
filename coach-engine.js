@@ -14,7 +14,10 @@ import {
   onResumeProgress,
   clearResumePartials,
   listResumePartials,
-} from "./resume-download.js?v=20260924-subject";
+  hasIncompleteDownloads,
+  estimateResumeProgress,
+  flushActiveDownloads,
+} from "./resume-download.js?v=20260924-resume2";
 
 env.allowLocalModels = false;
 env.useBrowserCache = true;
@@ -22,7 +25,14 @@ env.useBrowserCache = true;
 // 全程开启：刷新后再次 from_pretrained 时自动 Range 续传
 installResumableFetch();
 
-export { clearResumePartials, listResumePartials };
+export {
+  clearResumePartials,
+  listResumePartials,
+  hasIncompleteDownloads,
+  estimateResumeProgress,
+  flushActiveDownloads,
+  onResumeProgress,
+};
 
 const MODEL_ID = "onnx-community/Florence-2-base-ft";
 const TRANSFORMERS_CACHE = "transformers-cache";
