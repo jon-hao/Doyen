@@ -17,7 +17,7 @@ import {
   hasIncompleteDownloads,
   estimateResumeProgress,
   flushActiveDownloads,
-} from "./resume-download.js?v=20260924-noloop1";
+} from "./resume-download.js?v=20260924-assist1";
 
 env.allowLocalModels = false;
 env.useBrowserCache = true;
@@ -847,23 +847,46 @@ export async function loadCoach(onProgress, options) {
   }
 }
 
-async function runTask(task, vision_inputs, image_size) {
+async function runTask(task, image) {
   const model = await modelPromise;
-  const tokenizer = await tokenizerPromise;
   const processor = await processorPromise;
+  // 与官方用法一致：processor(image, prompts) 一次组好视觉+文本输入
   const prompts = processor.construct_prompts(task);
-  const text_inputs = tokenizer(prompts);
+  const inputs = await processor(image, prompts);
   const generated_ids = await model.generate({
-    ...text_inputs,
-    ...vision_inputs,
-    max_new_tokens: 128,
+    ...inputs,
+    max_new_tokens: 256,
     num_beams: 1,
     do_sample: false,
   });
-  const generated_text = tokenizer.batch_decode(generated_ids, {
+  const generated_text = processor.batch_decode(generated_ids, {
     skip_special_tokens: false,
   })[0];
-  return processor.post_process_generation(generated_text, task, image_size);
+  const size = image && image.size ? image.size : [image.width, image.height];
+  return processor.post_process_generation(generated_text, task, size);
+}
+
+function normalizeOdResult(odResult, odTask) {
+  const od = (odResult && (odResult[odTask] || odResult["<OD>"])) || odResult || {};
+  const labels = od.labels || [];
+  const bboxes = od.bboxes || od.boxes || [];
+  const objects = [];
+  const n = Math.max(labels.length, bboxes.length);
+  for (let i = 0; i < n; i++) {
+    const bbox = bboxes[i];
+    if (!bbox || bbox.length < 4) continue;
+    const x1 = Number(bbox[0]);
+    const y1 = Number(bbox[1]);
+    const x2 = Number(bbox[2]);
+    const y2 = Number(bbox[3]);
+    if (![x1, y1, x2, y2].every(Number.isFinite)) continue;
+    if (Math.abs(x2 - x1) < 2 || Math.abs(y2 - y1) < 2) continue;
+    objects.push({
+      label: String(labels[i] || "object"),
+      bbox: [x1, y1, x2, y2],
+    });
+  }
+  return objects;
 }
 
 /**
@@ -885,30 +908,19 @@ export async function analyzeFrame(source, onProgress) {
     throw new Error("无法读取当前画面");
   }
 
-  const processor = await processorPromise;
-  const image_size = image.size;
-  const vision_inputs = await processor(image);
-
   const captionTask = "<MORE_DETAILED_CAPTION>";
   const odTask = "<OD>";
-  const captionResult = await runTask(captionTask, vision_inputs, image_size);
-  const odResult = await runTask(odTask, vision_inputs, image_size);
+  const captionResult = await runTask(captionTask, image);
+  const odResult = await runTask(odTask, image);
 
   const caption =
     (captionResult && captionResult[captionTask]) ||
     (typeof captionResult === "string" ? captionResult : "") ||
     "";
 
-  const od = (odResult && odResult[odTask]) || {};
-  const labels = od.labels || [];
-  const bboxes = od.bboxes || [];
-  const objects = labels.map(function (label, i) {
-    return { label: label, bbox: bboxes[i] || null };
-  });
-
   return {
     caption: String(caption || "").trim(),
-    objects: objects,
+    objects: normalizeOdResult(odResult, odTask),
     device: deviceUsed,
   };
 }
@@ -931,21 +943,11 @@ export async function detectSubjects(source, onProgress) {
     throw new Error("无法读取当前画面");
   }
 
-  const processor = await processorPromise;
-  const image_size = image.size;
-  const vision_inputs = await processor(image);
   const odTask = "<OD>";
-  const odResult = await runTask(odTask, vision_inputs, image_size);
-  const od = (odResult && odResult[odTask]) || {};
-  const labels = od.labels || [];
-  const bboxes = od.bboxes || [];
-  const objects = labels.map(function (label, i) {
-    return { label: label, bbox: bboxes[i] || null };
-  });
-
+  const odResult = await runTask(odTask, image);
   return {
-    objects: objects,
-    imageSize: image_size,
+    objects: normalizeOdResult(odResult, odTask),
+    imageSize: image.size,
     device: deviceUsed,
   };
 }

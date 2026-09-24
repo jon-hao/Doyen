@@ -425,6 +425,29 @@
       padding: 0 12px;
       white-space: nowrap;
       z-index: 0;
+      transition:
+        transform 0.12s ease,
+        border-color 0.2s ease,
+        color 0.2s ease,
+        background 0.2s ease,
+        box-shadow 0.2s ease;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    #coachBtn:active:not(:disabled),
+    #coachBtn.pressed {
+      transform: scale(0.92);
+    }
+
+    #coachBtn.pulse {
+      animation: coachPulse 0.42s ease;
+    }
+
+    @keyframes coachPulse {
+      0% { transform: scale(1); }
+      35% { transform: scale(0.9); }
+      70% { transform: scale(1.04); }
+      100% { transform: scale(1); }
     }
 
     #coachBtn::before {
@@ -1569,7 +1592,7 @@
         } else {
           base = pathName + "/" + fileName;
         }
-        return base + "?v=20260924-noloop1";
+        return base + "?v=20260924-assist1";
       }
 
       function setCoachHint(text) {
@@ -1863,9 +1886,13 @@
         if (!subjectOverlay) return;
         const ctx = subjectOverlay.getContext("2d");
         if (!ctx) return;
-        const w = subjectOverlay.width;
-        const h = subjectOverlay.height;
-        ctx.clearRect(0, 0, w, h);
+        const w = subjectOverlay.width || subjectOverlay.clientWidth || 1;
+        const h = subjectOverlay.height || subjectOverlay.clientHeight || 1;
+        if (subjectOverlay.width !== w || subjectOverlay.height !== h) {
+          subjectOverlay.width = w;
+          subjectOverlay.height = h;
+        }
+        ctx.clearRect(0, 0, subjectOverlay.width, subjectOverlay.height);
       }
 
       function sizeSubjectOverlay() {
@@ -1898,13 +1925,14 @@
         let y1 = bbox[1] * scale + oy;
         let x2 = bbox[2] * scale + ox;
         let y2 = bbox[3] * scale + oy;
-        if (facingMode === "user") {
-          // 预览已镜像，检测图画也镜像过，坐标已对齐；无需再翻
-        }
         const x = Math.min(x1, x2);
         const y = Math.min(y1, y2);
         const bw = Math.abs(x2 - x1);
         const bh = Math.abs(y2 - y1);
+        if (bw < 4 || bh < 4) {
+          clearSubjectOverlay();
+          return;
+        }
 
         ctx.clearRect(0, 0, ow, oh);
         ctx.save();
@@ -1919,7 +1947,6 @@
         ctx.shadowBlur = 8;
         ctx.strokeRect(x, y, bw, bh);
         ctx.shadowBlur = 0;
-        // 角标
         const corner = Math.min(18, bw * 0.2, bh * 0.2);
         ctx.beginPath();
         ctx.moveTo(x, y + corner);
@@ -1938,44 +1965,81 @@
         ctx.restore();
       }
 
+      function pulseCoachBtn() {
+        coachBtn.classList.remove("pulse");
+        // 强制重启动画
+        void coachBtn.offsetWidth;
+        coachBtn.classList.add("pulse");
+        window.setTimeout(function () {
+          coachBtn.classList.remove("pulse");
+        }, 450);
+      }
+
       function stopSubjectTracking() {
         coachActive = false;
         coachDetectGen += 1;
+        coachTracking = false;
         coachBtn.classList.remove("active");
         clearSubjectOverlay();
         setCoachHint("");
       }
 
       async function subjectTrackLoop(gen) {
+        coachTracking = true;
         while (coachActive && gen === coachDetectGen) {
           if (!stream || document.hidden) {
             await new Promise(function (r) { setTimeout(r, 400); });
             continue;
           }
+          const started = Date.now();
           try {
             const snap = captureDetectCanvas();
+            if (!coachEngine || !coachEngine.detectSubjects) {
+              throw new Error("引擎未就绪");
+            }
             const vision = await coachEngine.detectSubjects(snap.canvas);
             if (!coachActive || gen !== coachDetectGen) break;
             const subject = coachEngine.pickPrimarySubject(vision.objects || []);
             if (subject && subject.bbox) {
-              // bbox 基于检测画布尺寸
               drawSubjectBox(subject.bbox, snap.srcW, snap.srcH);
-              // 识别中不展示小字
             } else {
               clearSubjectOverlay();
             }
-          } catch (err) {
+          } catch (_) {
             if (!coachActive || gen !== coachDetectGen) break;
+            clearSubjectOverlay();
           }
-          // 镜头移动持续检测；给设备一点喘息
-          await new Promise(function (r) { setTimeout(r, 120); });
+          // 检测防抖：每轮至少间隔 700ms，避免连打推理
+          const elapsed = Date.now() - started;
+          const wait = Math.max(0, 700 - elapsed);
+          await new Promise(function (r) { setTimeout(r, wait); });
         }
-        coachTracking = false;
+        if (gen === coachDetectGen) {
+          coachTracking = false;
+        }
       }
 
+      function startSubjectTracking() {
+        stopSubjectTracking();
+        coachActive = true;
+        coachBtn.classList.add("active");
+        setCoachHint("");
+        sizeSubjectOverlay();
+        const gen = ++coachDetectGen;
+        subjectTrackLoop(gen);
+      }
+
+      let coachClickLockUntil = 0;
+      let coachClickBusy = false;
+
       async function onCoachClick() {
+        const now = Date.now();
+        if (now < coachClickLockUntil || coachClickBusy) return;
+        coachClickLockUntil = now + 450;
+        pulseCoachBtn();
+
         if (!stream) return;
-        if (coachLoading) return; // 下载中不可再点
+        if (coachLoading) return;
         if (deviceReport && !deviceReport.assistOk) {
           showToast("当前环境不支持辅助拍摄", "err");
           return;
@@ -1985,29 +2049,38 @@
           return;
         }
 
-        if (!coachReady) {
-          const ok = await ensureCoachModelLoaded();
-          if (!ok) return;
-          // 下载完成后不自动开启，等用户再点一次
-          return;
-        }
+        coachClickBusy = true;
+        try {
+          if (!coachReady) {
+            const ok = await ensureCoachModelLoaded();
+            if (!ok) return;
+            // 下载完成后不自动开启，等用户再点一次
+            return;
+          }
 
-        if (coachActive) {
-          stopSubjectTracking();
-          return;
-        }
+          if (coachActive) {
+            stopSubjectTracking();
+            return;
+          }
 
-        coachActive = true;
-        coachBtn.classList.add("active");
-        setCoachHint("");
-        sizeSubjectOverlay();
-        const gen = ++coachDetectGen;
-        if (!coachTracking) {
-          coachTracking = true;
-          subjectTrackLoop(gen);
+          startSubjectTracking();
+        } finally {
+          coachClickBusy = false;
         }
       }
 
+      coachBtn.addEventListener("pointerdown", function () {
+        if (!coachBtn.disabled) coachBtn.classList.add("pressed");
+      });
+      coachBtn.addEventListener("pointerup", function () {
+        coachBtn.classList.remove("pressed");
+      });
+      coachBtn.addEventListener("pointerleave", function () {
+        coachBtn.classList.remove("pressed");
+      });
+      coachBtn.addEventListener("pointercancel", function () {
+        coachBtn.classList.remove("pressed");
+      });
       coachBtn.addEventListener("click", onCoachClick);
 
       gate.addEventListener("click", function () {
