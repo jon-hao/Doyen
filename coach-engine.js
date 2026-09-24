@@ -17,7 +17,7 @@ import {
   hasIncompleteDownloads,
   estimateResumeProgress,
   flushActiveDownloads,
-} from "./resume-download.js?v=20260924-dlfix1";
+} from "./resume-download.js?v=20260924-noloop1";
 
 env.allowLocalModels = false;
 env.useBrowserCache = true;
@@ -203,10 +203,24 @@ async function cacheHasFile(cache, host, file) {
   const url = modelFileUrl(host, file);
   try {
     const hit = await cache.match(url);
-    return !!(hit && (hit.ok || hit.type === "opaque"));
-  } catch (_) {
-    return false;
-  }
+    if (hit && (hit.ok || hit.type === "opaque")) return true;
+  } catch (_) {}
+
+  // 兼容：按路径后缀匹配（偶发 key 带 query / 编码差异）
+  try {
+    if (!cache.keys) return false;
+    const keys = await cache.keys();
+    const needle = "/" + MODEL_ID + "/resolve/main/" + file;
+    const needleAlt = MODEL_ID + "/" + file;
+    for (let i = 0; i < keys.length; i++) {
+      const req = keys[i];
+      const u = (req && req.url) || String(req);
+      if (u.indexOf(needle) >= 0 || u.indexOf(needleAlt) >= 0) {
+        return true;
+      }
+    }
+  } catch (_) {}
+  return false;
 }
 
 async function hostHasCompleteModel(host) {
@@ -232,11 +246,10 @@ async function hostHasCompleteModel(host) {
 }
 
 /**
- * 若浏览器 Cache API 里已有完整模型，返回对应 host
- * （尊重用户源偏好：强制全球/国内时不串用另一源的缓存）
+ * 若浏览器 Cache API 里已有完整模型，返回对应 host。
+ * 不论源偏好如何，只要任一源已下齐就复用，避免「本地已有全球源却又去下镜像」。
  */
 export async function findCachedModelHost() {
-  const pref = getHostPreference();
   const ordered = [];
 
   function push(h) {
@@ -245,14 +258,10 @@ export async function findCachedModelHost() {
     ordered.push(n);
   }
 
-  if (pref === "global") {
-    push(GLOBAL_HOST);
-  } else if (pref === "mirror") {
-    push(MIRROR_HOST);
-  } else {
-    push(resolvePreferredHost());
-    HOST_CANDIDATES.forEach(push);
-  }
+  // 先看当前记住的源，再扫两个候选
+  push(resolvePreferredHost());
+  push(GLOBAL_HOST);
+  push(MIRROR_HOST);
 
   for (let i = 0; i < ordered.length; i++) {
     const host = ordered[i];
@@ -773,6 +782,9 @@ export async function loadCoach(onProgress, options) {
     }
 
     markModelReady(env.remoteHost, deviceUsed);
+    try {
+      await clearResumePartials();
+    } catch (_) {}
     notify(onProgress, {
       status: "ready",
       device: deviceUsed,
@@ -800,7 +812,7 @@ export async function loadCoach(onProgress, options) {
       return loadCoach(onProgress, { forceRemote: true });
     }
 
-    // 当前源下载失败时，自动换另一源再试一次
+    // 当前源下载失败时，自动换另一源再试一次（不永久改写偏好，避免忽略另一源缓存）
     if (!opts.switchedHost && !fromCache) {
       const cur = normalizeHost(env.remoteHost);
       const alt = isMirrorHost(cur) ? GLOBAL_HOST : MIRROR_HOST;
@@ -810,7 +822,6 @@ export async function loadCoach(onProgress, options) {
       warmed = false;
       deviceUsed = null;
       setModelHost(alt);
-      setHostPreference(isMirrorHost(alt) ? "mirror" : "global");
       notify(onProgress, {
         status: "loading",
         data: "切换到" + hostLabel(alt) + "重试…",

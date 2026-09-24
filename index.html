@@ -1569,7 +1569,7 @@
         } else {
           base = pathName + "/" + fileName;
         }
-        return base + "?v=20260924-dlfix1";
+        return base + "?v=20260924-noloop1";
       }
 
       function setCoachHint(text) {
@@ -1701,6 +1701,15 @@
 
       function handleCoachProgress(msg) {
         if (!msg) return;
+        // 本地缓存加载也会回调 progress，不能当成「正在下载」
+        if (msg.fromCache) {
+          if (msg.status === "ready") {
+            setCoachBtnProgress(0);
+            setCoachHint("");
+            coachDownloadTracker = null;
+          }
+          return;
+        }
         if (
           msg.status === "initiate" ||
           msg.status === "download" ||
@@ -1713,7 +1722,6 @@
           const snap = coachDownloadTracker.onEvent(msg);
           if (snap) {
             setCoachBtnProgress(snap.pct);
-            // 仅下载中展示小字
             setCoachHint("下载资源 " + Number(snap.pct).toFixed(0) + "%");
           }
           return;
@@ -1724,7 +1732,6 @@
           setCoachHint("");
           coachDownloadTracker = null;
         }
-        // 其余 loading 文案不展示
       }
 
       async function ensureCoachEngine() {
@@ -1744,25 +1751,45 @@
         try {
           const engine = await ensureCoachEngine();
 
-          let startPct = 0;
+          let fromCacheLikely = false;
           try {
-            if (engine.estimateResumeProgress) {
-              const est = await engine.estimateResumeProgress();
-              if (est && est.files > 0 && est.pct > 0) startPct = est.pct;
+            if (engine.findCachedModelHost) {
+              const cached = await engine.findCachedModelHost();
+              if (cached && cached.ok) {
+                fromCacheLikely = true;
+                if (engine.clearResumePartials) {
+                  await engine.clearResumePartials();
+                }
+              }
             }
           } catch (_) {}
 
-          setCoachBtnProgress(startPct);
-          setCoachHint(
-            startPct > 0
-              ? "下载资源 " + Number(startPct).toFixed(0) + "%"
-              : "下载资源 0%"
-          );
+          if (fromCacheLikely) {
+            setCoachBtnProgress(0);
+            setCoachHint("");
+          } else {
+            let startPct = 0;
+            try {
+              if (engine.estimateResumeProgress) {
+                const est = await engine.estimateResumeProgress();
+                if (est && est.files > 0 && est.pct > 0) startPct = est.pct;
+              }
+            } catch (_) {}
+            setCoachBtnProgress(startPct);
+            setCoachHint(
+              startPct > 0
+                ? "下载资源 " + Number(startPct).toFixed(0) + "%"
+                : "下载资源 0%"
+            );
+          }
 
           await engine.loadCoach(handleCoachProgress);
           coachReady = true;
           setCoachBtnProgress(0);
           setCoachHint("");
+          try {
+            if (engine.clearResumePartials) await engine.clearResumePartials();
+          } catch (_) {}
           return true;
         } catch (err) {
           try {
@@ -1790,17 +1817,25 @@
         }
       }
 
-      /** 进入可下载状态后：有未完成缓存则自动继续下 */
+      /** 仅在明确有半成品、且本地缓存未齐时自动续传；有完整缓存则清掉半成品防死循环 */
       async function maybeAutoResumeCoachDownload() {
         if (!deviceReport || !deviceReport.assistOk) return;
         if (coachReady || coachLoading) return;
         try {
           const engine = await ensureCoachEngine();
+          if (engine.findCachedModelHost) {
+            const cached = await engine.findCachedModelHost();
+            if (cached && cached.ok) {
+              if (engine.clearResumePartials) {
+                await engine.clearResumePartials();
+              }
+              return;
+            }
+          }
           let incomplete = false;
           if (engine.hasIncompleteDownloads) {
             incomplete = await engine.hasIncompleteDownloads();
           }
-          // 本地未就绪时，只要之前点过下载留下了半成品就自动续传
           if (incomplete) {
             await ensureCoachModelLoaded();
           }
@@ -2002,14 +2037,13 @@
       document.addEventListener("visibilitychange", function () {
         if (!document.hidden) {
           resumePreview();
-          maybeAutoResumeCoachDownload();
+          // 不再自动续传：闪退后半成品 + 自动开下会再次 OOM，形成刷新死循环
         } else if (coachEngine && coachEngine.flushActiveDownloads) {
           coachEngine.flushActiveDownloads().catch(function () {});
         }
       });
       window.addEventListener("pageshow", function () {
         resumePreview();
-        maybeAutoResumeCoachDownload();
       });
       window.addEventListener("pagehide", function () {
         if (coachEngine && coachEngine.flushActiveDownloads) {

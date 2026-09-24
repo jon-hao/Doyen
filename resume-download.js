@@ -260,78 +260,54 @@ function notifyByteProgress(url, loaded, total, status) {
 }
 
 /**
- * 旁路 tee：一边给 Transformers 读（保留原始 Response/进度），一边写入 IDB 以便中断续传。
+ * 旁路 tee 已弃用：大 ONNX tee 会双倍占内存，手机上容易 OOM 闪退/自动刷新，
+ * 刷新后又因 IDB 半成品触发续传，形成死循环。
+ * 全新下载走原始 Response；仅在已有 IDB 半成品时用 Range 续传。
  */
-function persistSideStream(url, stream, total, etag, contentType) {
-  let savedBlob = new Blob();
-  let pending = [];
-  let pendingSize = 0;
-  let loaded = 0;
-  let persistChain = Promise.resolve();
-  let lastNotify = 0;
 
-  function flushPending(force) {
-    if (!pending.length) return persistChain;
-    if (!force && pendingSize < PERSIST_EVERY) return persistChain;
-    const chunkBlob = new Blob(pending);
-    pending = [];
-    pendingSize = 0;
-    savedBlob = new Blob([savedBlob, chunkBlob]);
-    const snapshot = savedBlob;
-    const sizeNow = snapshot.size;
-    persistChain = persistChain
-      .then(function () {
-        return putPartial({
-          url: url,
-          etag: etag || "",
-          total: total || 0,
-          blob: snapshot,
-          updatedAt: Date.now(),
-        });
-      })
-      .then(function () {
-        notifyByteProgress(url, sizeNow, total, "persist");
-      })
-      .catch(function () {});
-    return persistChain;
-  }
+/** 已知文件大小：镜像常不返回 Content-Length，补上以便进度条与 Transformers 计算 % */
+const KNOWN_FILE_SIZES = {
+  "config.json": 5432,
+  "tokenizer.json": 2297961,
+  "tokenizer_config.json": 197658,
+  "preprocessor_config.json": 2673,
+  "generation_config.json": 4096,
+  "onnx/decoder_model_merged_q4.onnx": 64393474,
+  "onnx/encoder_model_q4.onnx": 30058778,
+  "onnx/embed_tokens_fp16.onnx": 78780290,
+  "onnx/embed_tokens.onnx": 157560044,
+  "onnx/vision_encoder_fp16.onnx": 183930536,
+  "onnx/vision_encoder.onnx": 366549825,
+};
 
-  activeDownloads.set(url, {
-    flush: function () {
-      return flushPending(true);
-    },
-  });
-
-  (async function () {
-    try {
-      const reader = stream.getReader();
-      for (;;) {
-        const chunk = await reader.read();
-        if (chunk.done) break;
-        const value = chunk.value;
-        pending.push(value);
-        const n = value.byteLength || value.length || 0;
-        pendingSize += n;
-        loaded += n;
-        if (loaded - lastNotify >= PERSIST_EVERY || !lastNotify) {
-          lastNotify = loaded;
-          notifyByteProgress(url, loaded, total, "progress");
-        }
-        if (pendingSize >= PERSIST_EVERY) {
-          await flushPending(false);
-        }
-      }
-      await flushPending(true);
-      await deletePartial(url);
-      notifyByteProgress(url, total || loaded, total || loaded, "done");
-    } catch (_) {
-      try {
-        await flushPending(true);
-      } catch (_) {}
-    } finally {
-      activeDownloads.delete(url);
+function knownSizeForUrl(url) {
+  const file = fileNameFromUrl(url);
+  if (KNOWN_FILE_SIZES[file]) return KNOWN_FILE_SIZES[file];
+  const base = String(file).split("/").pop();
+  const keys = Object.keys(KNOWN_FILE_SIZES);
+  for (let i = 0; i < keys.length; i++) {
+    if (keys[i] === base || keys[i].endsWith("/" + base)) {
+      return KNOWN_FILE_SIZES[keys[i]];
     }
-  })();
+  }
+  return 0;
+}
+
+function withContentLength(response, total) {
+  if (!response || !(total > 0)) return response;
+  try {
+    const existing = parseInt(response.headers.get("Content-Length") || "0", 10);
+    if (existing > 0) return response;
+    const headers = new Headers(response.headers);
+    headers.set("Content-Length", String(total));
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: headers,
+    });
+  } catch (_) {
+    return response;
+  }
 }
 
 /**
@@ -520,8 +496,12 @@ async function resumableFetch(url, init, fetchImpl) {
     total = parseInt(networkRes.headers.get("Content-Length") || "0", 10) || 0;
   }
 
+  if (!total) {
+    total = (partial && partial.total) || knownSizeForUrl(url) || 0;
+  }
+
   if (total > 0 && total < MIN_RESUME_BYTES && start === 0) {
-    return networkRes;
+    return withContentLength(networkRes, total);
   }
 
   if (start > 0 && total > 0 && start >= total) {
@@ -529,27 +509,9 @@ async function resumableFetch(url, init, fetchImpl) {
     return fetchImpl(url, init);
   }
 
-  // 全新下载：tee 旁路落盘，把原始 Response 交给 Transformers，避免进度一直 0% / iOS Load failed
+  // 全新下载：绝不 tee（防 OOM 闪退循环）；只补 Content-Length 让进度可算
   if (start === 0) {
-    if (
-      networkRes.status === 200 &&
-      total >= MIN_RESUME_BYTES &&
-      networkRes.body &&
-      typeof networkRes.body.tee === "function"
-    ) {
-      try {
-        const sides = networkRes.body.tee();
-        persistSideStream(url, sides[1], total, etag, contentType);
-        return new Response(sides[0], {
-          status: networkRes.status,
-          statusText: networkRes.statusText,
-          headers: networkRes.headers,
-        });
-      } catch (_) {
-        return networkRes;
-      }
-    }
-    return networkRes;
+    return withContentLength(networkRes, total);
   }
 
   notifyResume({
