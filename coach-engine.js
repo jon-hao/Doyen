@@ -1,30 +1,40 @@
 /**
- * 轻量主体检测引擎（MediaPipe EfficientDet-Lite0，约 7MB）
- * 替代 Florence-2，显著降低 iPhone 内存占用。
+ * 轻量主体检测 + 轮廓分割
+ * - EfficientDet-Lite0：选主体 / 跟踪
+ * - MagicTouch Interactive Segmenter：精确轮廓
  */
 import {
   ObjectDetector,
+  InteractiveSegmenter,
   FilesetResolver,
 } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/+esm";
 
-const READY_KEY = "doyen_model_ready";
+const READY_KEY = "doyen_model_ready_v2";
 const MODEL_ID = "mediapipe/efficientdet_lite0_float16";
-const MODEL_BYTES = 7244197; // 约 6.9MB，用于进度估算
+const OD_BYTES = 7244197;
+const SEG_BYTES = 6227884;
+const MODEL_BYTES = OD_BYTES + SEG_BYTES;
 const MP_VERSION = "0.10.18";
 const WASM_CDN =
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@" + MP_VERSION + "/wasm";
 
 let detector = null;
+let segmenter = null;
 let warmed = false;
 let deviceUsed = "wasm";
 let loadPromise = null;
 let videoTs = 0;
 /** @type {null | {label:string, score:number, bbox:number[]}} */
 let trackedSubject = null;
-/** 连续未检测到主体的帧数；用于短暂丢检时不立刻清框 */
+/** 用户点击锁定的主体（优先级最高） */
+let pinnedSubject = null;
+/** 连续未检测到主体的帧数 */
 let trackMissStreak = 0;
+let pinMissStreak = 0;
 /** @type {"landscape" | "portrait"} */
 let subjectMode = "landscape";
+/** @type {"landscape" | "portrait"} 手机横握/竖握 */
+let holdOrientation = "portrait";
 
 /**
  * 风景 / 人像 切换检测策略。
@@ -35,19 +45,28 @@ export async function setSubjectMode(mode) {
   if (next === subjectMode && detector) return subjectMode;
   subjectMode = next;
   trackedSubject = null;
+  pinnedSubject = null;
   trackMissStreak = 0;
+  pinMissStreak = 0;
   if (!detector || typeof detector.setOptions !== "function") return subjectMode;
   try {
     if (subjectMode === "portrait") {
       await detector.setOptions({ categoryAllowlist: ["person"] });
     } else {
-      // 清空 allowlist，恢复检测所有类别
       await detector.setOptions({ categoryAllowlist: [] });
     }
-  } catch (_) {
-    // 部分 runtime 不支持动态改 allowlist，仍靠 pickPrimarySubject 分流
-  }
+  } catch (_) {}
   return subjectMode;
+}
+
+export function setHoldOrientation(orient) {
+  holdOrientation =
+    orient === "landscape" ? "landscape" : "portrait";
+  return holdOrientation;
+}
+
+export function getHoldOrientation() {
+  return holdOrientation;
 }
 
 export function getSubjectMode() {
@@ -67,12 +86,12 @@ function assetUrl(rel) {
   return dir + rel.replace(/^\//, "");
 }
 
-function modelCandidateUrls() {
-  const local = assetUrl("models/efficientdet_lite0.tflite");
+function modelCandidateUrls(fileName) {
+  const local = assetUrl("models/" + fileName);
   return [
     local,
-    "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/models/efficientdet_lite0.tflite",
-    "https://raw.githubusercontent.com/jon-hao/Doyen/main/models/efficientdet_lite0.tflite",
+    "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/models/" + fileName,
+    "https://raw.githubusercontent.com/jon-hao/Doyen/main/models/" + fileName,
   ];
 }
 
@@ -80,15 +99,16 @@ async function fetchWithProgress(url, onProgress, label, rangeStart, rangeEnd) {
   const start = typeof rangeStart === "number" ? rangeStart : 0;
   const end = typeof rangeEnd === "number" ? rangeEnd : 1;
   const span = Math.max(0.01, end - start);
+  const fileTotal =
+    label === "magic_touch.tflite" ? SEG_BYTES : OD_BYTES;
 
   function report(loadedPart, totalPart) {
     const ratio = totalPart > 0 ? loadedPart / totalPart : 1;
-    const overall = start + Math.min(1, Math.max(0, ratio)) * span;
     notify(onProgress, {
       status: "progress",
       file: label,
-      loaded: Math.round(MODEL_BYTES * overall),
-      total: MODEL_BYTES,
+      loaded: Math.round((totalPart > 0 ? totalPart : fileTotal) * Math.min(1, ratio)),
+      total: totalPart > 0 ? totalPart : fileTotal,
     });
   }
 
@@ -96,7 +116,7 @@ async function fetchWithProgress(url, onProgress, label, rangeStart, rangeEnd) {
   if (!res.ok) throw new Error("下载失败 HTTP " + res.status);
 
   const totalHeader = parseInt(res.headers.get("Content-Length") || "0", 10);
-  const total = totalHeader > 0 ? totalHeader : MODEL_BYTES;
+  const total = totalHeader > 0 ? totalHeader : fileTotal;
 
   if (!res.body || !res.body.getReader) {
     const buf = new Uint8Array(await res.arrayBuffer());
@@ -124,23 +144,36 @@ async function fetchWithProgress(url, onProgress, label, rangeStart, rangeEnd) {
   return out;
 }
 
-async function fetchModelBuffer(onProgress) {
-  const urls = modelCandidateUrls();
+async function fetchNamedModelBuffer(fileName, onProgress, rangeStart, rangeEnd) {
+  const urls = modelCandidateUrls(fileName);
   let lastErr = null;
   for (let i = 0; i < urls.length; i++) {
     try {
       return await fetchWithProgress(
         urls[i],
         onProgress,
-        "efficientdet_lite0.tflite",
-        0.15,
-        0.9
+        fileName,
+        rangeStart,
+        rangeEnd
       );
     } catch (err) {
       lastErr = err;
     }
   }
   throw lastErr || new Error("模型文件不可用");
+}
+
+async function fetchModelBuffer(onProgress) {
+  return fetchNamedModelBuffer(
+    "efficientdet_lite0.tflite",
+    onProgress,
+    0.12,
+    0.55
+  );
+}
+
+async function fetchSegmenterBuffer(onProgress) {
+  return fetchNamedModelBuffer("magic_touch.tflite", onProgress, 0.55, 0.92);
 }
 
 function markModelReady() {
@@ -221,47 +254,43 @@ export function resetCoachRuntime() {
   try {
     if (detector && typeof detector.close === "function") detector.close();
   } catch (_) {}
+  try {
+    if (segmenter && typeof segmenter.close === "function") segmenter.close();
+  } catch (_) {}
   detector = null;
+  segmenter = null;
   warmed = false;
   loadPromise = null;
   deviceUsed = "wasm";
   videoTs = 0;
   trackedSubject = null;
+  pinnedSubject = null;
+  trackMissStreak = 0;
+  pinMissStreak = 0;
   subjectMode = "landscape";
 }
 export function getCoachDevice() {
   return deviceUsed;
 }
 
-function emitResourceProgress(onProgress, fraction) {
-  const pct = Math.max(0, Math.min(0.99, Number(fraction) || 0));
-  notify(onProgress, {
-    status: "progress",
-    file: "efficientdet_lite0.tflite",
-    loaded: Math.round(MODEL_BYTES * pct),
-    total: MODEL_BYTES,
-  });
-}
-
 async function createDetector(onProgress) {
   notify(onProgress, {
     status: "initiate",
     file: "efficientdet_lite0.tflite",
-    total: MODEL_BYTES,
+    total: OD_BYTES,
   });
   notify(onProgress, {
     status: "download",
     file: "efficientdet_lite0.tflite",
-    total: MODEL_BYTES,
+    total: OD_BYTES,
   });
-  emitResourceProgress(onProgress, 0.02);
+  emitResourceProgress(onProgress, 0.02, "efficientdet_lite0.tflite", OD_BYTES);
 
-  // 运行时 WASM（计入资源下载进度，避免长时间停在 0%）
   const vision = await FilesetResolver.forVisionTasks(WASM_CDN);
-  emitResourceProgress(onProgress, 0.15);
+  emitResourceProgress(onProgress, 0.1, "efficientdet_lite0.tflite", OD_BYTES);
 
   const modelBuffer = await fetchModelBuffer(onProgress);
-  emitResourceProgress(onProgress, 0.92);
+  emitResourceProgress(onProgress, 0.52, "efficientdet_lite0.tflite", OD_BYTES);
 
   let created;
   try {
@@ -273,7 +302,6 @@ async function createDetector(onProgress) {
       scoreThreshold: 0.26,
       maxResults: 16,
       runningMode: "VIDEO",
-      // 默认风景：不限制类别；人像模式切换时再 setOptions 只留 person
     });
     deviceUsed = "wasm";
   } catch (_) {
@@ -289,17 +317,60 @@ async function createDetector(onProgress) {
     deviceUsed = "webgl";
   }
 
-  videoTs = 0;
-  trackedSubject = null;
-
-  emitResourceProgress(onProgress, 0.99);
   notify(onProgress, {
     status: "done",
     file: "efficientdet_lite0.tflite",
-    loaded: MODEL_BYTES,
-    total: MODEL_BYTES,
+    loaded: OD_BYTES,
+    total: OD_BYTES,
   });
+
+  // 轮廓分割（失败则仅用框，不阻断辅助拍摄）
+  try {
+    notify(onProgress, {
+      status: "initiate",
+      file: "magic_touch.tflite",
+      total: SEG_BYTES,
+    });
+    notify(onProgress, {
+      status: "download",
+      file: "magic_touch.tflite",
+      total: SEG_BYTES,
+    });
+    const segBuf = await fetchSegmenterBuffer(onProgress);
+    segmenter = await InteractiveSegmenter.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetBuffer: segBuf,
+        delegate: "CPU",
+      },
+      outputCategoryMask: true,
+      outputConfidenceMasks: false,
+    });
+    notify(onProgress, {
+      status: "done",
+      file: "magic_touch.tflite",
+      loaded: SEG_BYTES,
+      total: SEG_BYTES,
+    });
+  } catch (_) {
+    segmenter = null;
+  }
+
+  videoTs = 0;
+  trackedSubject = null;
+  pinnedSubject = null;
+  emitResourceProgress(onProgress, 0.99, "magic_touch.tflite", SEG_BYTES);
   return created;
+}
+
+function emitResourceProgress(onProgress, fraction, file, totalBytes) {
+  const pct = Math.max(0, Math.min(0.99, Number(fraction) || 0));
+  const total = totalBytes || MODEL_BYTES;
+  notify(onProgress, {
+    status: "progress",
+    file: file || "efficientdet_lite0.tflite",
+    loaded: Math.round(total * pct),
+    total: total,
+  });
 }
 
 export async function loadCoach(onProgress) {
@@ -614,8 +685,8 @@ function landscapeClassWeight(label) {
 
 /**
  * 人像策略：只框人。
- * 权重：① 身体完整度（少裁切）② 接近画面中心 ③ 合适占比 + 人形长宽比。
- * 参考：单人视频管线用 conf / area / completeness / 跟踪位置排序。
+ * 权重：① 身体完整度 ② 接近画面中心 ③ 合适占比 + 人形长宽比。
+ * 横握/竖握调整：竖握偏全身竖构图；横握略放宽宽高比、更看重水平居中。
  */
 function portraitSalience(obj, imgW, imgH) {
   const b = obj && obj.bbox;
@@ -634,24 +705,31 @@ function portraitSalience(obj, imgW, imgH) {
   const center = boxCenterScore(b, w, h);
   const conf = Math.max(0, Math.min(1, Number(obj.score) || 0));
   const aspect = bw / Math.max(bh, 1);
+  const holdLand = holdOrientation === "landscape";
 
-  // 全身偏竖、半身略宽都可；过扁多为误检
   let shape = 0.7;
-  if (aspect >= 0.22 && aspect <= 0.72) shape = 1.25;
-  else if (aspect > 0.72 && aspect <= 1.05) shape = 1.05;
-  else if (aspect > 1.2) shape = 0.4;
+  if (holdLand) {
+    if (aspect >= 0.28 && aspect <= 1.05) shape = 1.25;
+    else if (aspect > 1.05 && aspect <= 1.35) shape = 1.0;
+    else if (aspect > 1.5) shape = 0.4;
+  } else {
+    if (aspect >= 0.22 && aspect <= 0.72) shape = 1.25;
+    else if (aspect > 0.72 && aspect <= 1.05) shape = 1.05;
+    else if (aspect > 1.2) shape = 0.4;
+  }
 
   const sizeSweet =
     areaRatio < 0.08
       ? areaRatio / 0.08
-      : areaRatio <= 0.45
+      : areaRatio <= (holdLand ? 0.5 : 0.45)
         ? 1
         : Math.max(0.2, 1 - (areaRatio - 0.45) / 0.35);
 
-  // 完整度主导，中心其次
+  const centerW = holdLand ? 3.8 : 3.2;
+
   return (
     completeness * 12 +
-    center * 3.2 +
+    center * centerW +
     sizeSweet * 1.4 +
     shape * 0.9 +
     conf * 0.8
@@ -659,9 +737,8 @@ function portraitSalience(obj, imgW, imgH) {
 }
 
 /**
- * 风景策略：类显著目标（SOD）选独立主体，不强制人。
- * 权重：① 完整度 ② 中心 / 三分法 ③ 区域对比度 ④ 类别先验 ⑤ 中等尺寸甜区。
- * 依据：移动端构图与 SOD 综述——突出前景、避开场景平面。
+ * 风景策略：类显著目标选独立主体。
+ * 竖握偏中心偏上构图；横握更看三分法横向兴趣点与中等宽度主体。
  */
 function landscapeSalience(obj, imgW, imgH, canvas) {
   const b = obj && obj.bbox;
@@ -682,16 +759,33 @@ function landscapeSalience(obj, imgW, imgH, canvas) {
   const contrast = regionContrastScore(canvas, b);
   const classW = landscapeClassWeight(obj.label);
   const aspect = bw / Math.max(bh, 1);
+  const holdLand = holdOrientation === "landscape";
   const shape = aspect > 2.4 || aspect < 0.12 ? 0.55 : 1;
 
   const sizeSweet =
     areaRatio < 0.06
       ? areaRatio / 0.06
-      : areaRatio <= 0.35
+      : areaRatio <= (holdLand ? 0.4 : 0.35)
         ? 1
         : Math.max(0.15, 1 - (areaRatio - 0.35) / 0.3);
 
-  const placement = Math.max(center, thirds * 0.95);
+  // 竖握：略偏画面中心偏上；横握：中心与三分法并重
+  let placement;
+  if (holdLand) {
+    placement = Math.max(center * 0.9, thirds);
+  } else {
+    const cy = (Math.min(b[1], b[3]) + Math.max(b[1], b[3])) / 2;
+    const upper = 1 - Math.min(1, Math.abs(cy / h - 0.42) * 2.2);
+    placement = Math.max(center, thirds * 0.85) * (0.75 + 0.25 * upper);
+  }
+
+  const holdBoost = holdLand
+    ? aspect >= 0.7 && aspect <= 1.8
+      ? 1.08
+      : 1
+    : aspect <= 1.1
+      ? 1.06
+      : 1;
 
   return (
     (completeness * 10 +
@@ -700,7 +794,8 @@ function landscapeSalience(obj, imgW, imgH, canvas) {
       sizeSweet * 1.5 +
       conf * 0.7) *
     classW *
-    shape
+    shape *
+    holdBoost
   );
 }
 
@@ -800,7 +895,7 @@ function detectionsToObjects(result) {
 /**
  * @param {Blob|HTMLCanvasElement} source
  * @param {function=} onProgress
- * @param {{mode?: "landscape"|"portrait"}=} options
+ * @param {{mode?: "landscape"|"portrait", holdOrientation?: "landscape"|"portrait"}=} options
  */
 export async function detectSubjects(source, onProgress, options) {
   if (!detector || !warmed) {
@@ -808,6 +903,9 @@ export async function detectSubjects(source, onProgress, options) {
   }
   const mode =
     options && options.mode === "portrait" ? "portrait" : "landscape";
+  if (options && options.holdOrientation) {
+    setHoldOrientation(options.holdOrientation);
+  }
   if (mode !== subjectMode) {
     await setSubjectMode(mode);
   }
@@ -822,7 +920,6 @@ export async function detectSubjects(source, onProgress, options) {
   }
 
   let objects = detectionsToObjects(result);
-  // 人像兜底：即便 allowlist 未生效，也只保留人
   if (mode === "portrait") {
     objects = objects.filter(function (o) {
       return isPersonLabel(o.label);
@@ -838,13 +935,162 @@ export async function detectSubjects(source, onProgress, options) {
   );
   const primary = stabilizeSubject(primaryRaw, canvas.width, canvas.height, mode);
 
+  let mask = null;
+  if (primary && primary.bbox) {
+    const cx =
+      (Math.min(primary.bbox[0], primary.bbox[2]) +
+        Math.max(primary.bbox[0], primary.bbox[2])) /
+      2;
+    const cy =
+      (Math.min(primary.bbox[1], primary.bbox[3]) +
+        Math.max(primary.bbox[1], primary.bbox[3])) /
+      2;
+    const nx = pinnedSubject && typeof pinnedSubject.nx === "number"
+      ? pinnedSubject.nx
+      : cx / Math.max(1, canvas.width);
+    const ny = pinnedSubject && typeof pinnedSubject.ny === "number"
+      ? pinnedSubject.ny
+      : cy / Math.max(1, canvas.height);
+    mask = segmentSubjectMask(canvas, nx, ny);
+  }
+
   return {
     objects: objects,
     primary: primary,
+    mask: mask,
     mode: mode,
     imageSize: [canvas.width, canvas.height],
     device: deviceUsed,
   };
+}
+
+/**
+ * 在点击位置附近锁定可识别主体（优先级最高）
+ * @returns {object|null} 锁定的主体
+ */
+export function pinSubjectAt(objects, x, y, imgW, imgH, mode) {
+  const list = objects || [];
+  const m = mode === "portrait" ? "portrait" : "landscape";
+  let pool = list;
+  if (m === "portrait") {
+    pool = list.filter(function (o) {
+      return isPersonLabel(o.label);
+    });
+  }
+  pool = keepAtomicIndividuals(pool);
+  if (!pool.length) {
+    pinnedSubject = null;
+    return null;
+  }
+
+  const w = Math.max(1, imgW || 1);
+  const h = Math.max(1, imgH || 1);
+  const radius = Math.min(w, h) * 0.1;
+  let best = null;
+  let bestRank = Infinity;
+
+  for (let i = 0; i < pool.length; i++) {
+    const o = pool[i];
+    const b = o.bbox;
+    if (!b) continue;
+    const x1 = Math.min(b[0], b[2]);
+    const y1 = Math.min(b[1], b[3]);
+    const x2 = Math.max(b[0], b[2]);
+    const y2 = Math.max(b[1], b[3]);
+    const inside = x >= x1 && x <= x2 && y >= y1 && y <= y2;
+    const cx = (x1 + x2) / 2;
+    const cy = (y1 + y2) / 2;
+    let dist;
+    if (inside) {
+      dist = Math.sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy)) * 0.25;
+    } else {
+      const dx = x < x1 ? x1 - x : x > x2 ? x - x2 : 0;
+      const dy = y < y1 ? y1 - y : y > y2 ? y - y2 : 0;
+      dist = Math.sqrt(dx * dx + dy * dy);
+    }
+    if (dist > radius && !inside) continue;
+    const rank = inside ? dist : dist + 50;
+    if (rank < bestRank) {
+      bestRank = rank;
+      best = o;
+    }
+  }
+
+  if (!best) {
+    pinnedSubject = null;
+    return null;
+  }
+
+  pinnedSubject = {
+    label: best.label,
+    score: best.score,
+    bbox: best.bbox.slice(),
+    nx: x / w,
+    ny: y / h,
+  };
+  pinMissStreak = 0;
+  trackedSubject = {
+    label: best.label,
+    score: best.score,
+    bbox: best.bbox.slice(),
+  };
+  trackMissStreak = 0;
+  return pinnedSubject;
+}
+
+export function clearPinnedSubject() {
+  pinnedSubject = null;
+  pinMissStreak = 0;
+}
+
+/**
+ * MagicTouch：在归一化点击/主体中心处分割轮廓掩码
+ * @returns {null|{width:number,height:number,data:Uint8Array}}
+ */
+export function segmentSubjectMask(canvas, nx, ny) {
+  if (!segmenter || !canvas) return null;
+  const x = Math.max(0, Math.min(1, Number(nx) || 0.5));
+  const y = Math.max(0, Math.min(1, Number(ny) || 0.5));
+  let out = null;
+  try {
+    segmenter.segment(
+      canvas,
+      { keypoint: { x: x, y: y } },
+      function (result) {
+        const mask = result && result.categoryMask;
+        if (!mask) return;
+        const mw = mask.width | 0;
+        const mh = mask.height | 0;
+        if (!mw || !mh) return;
+        let src;
+        try {
+          src = mask.getAsUint8Array();
+        } catch (_) {
+          try {
+            const f32 = mask.getAsFloat32Array();
+            src = new Uint8Array(f32.length);
+            for (let i = 0; i < f32.length; i++) {
+              src[i] = f32[i] > 0.5 ? 1 : 0;
+            }
+          } catch (_) {
+            return;
+          }
+        }
+        out = {
+          width: mw,
+          height: mh,
+          data: new Uint8Array(src),
+        };
+      }
+    );
+  } catch (_) {
+    return null;
+  }
+  return out;
+}
+
+export function hasSegmenter() {
+  return !!segmenter;
 }
 
 /** 兼容旧接口 */
@@ -854,6 +1100,7 @@ export async function analyzeFrame(source, onProgress, options) {
     caption: "",
     objects: vision.objects,
     primary: vision.primary,
+    mask: vision.mask,
     device: deviceUsed,
   };
 }
@@ -861,7 +1108,7 @@ export async function analyzeFrame(source, onProgress, options) {
 /**
  * 风景：类 SOD + 构图先验，挑一个独立主体（不强制人）
  * 人像：只框人；没人则返回 null
- * @param {HTMLCanvasElement=} canvas 可选，用于风景对比度打分
+ * 用户点击锁定的主体优先级最高
  */
 export function pickPrimarySubject(objects, imgW, imgH, mode, canvas) {
   const list = objects || [];
@@ -883,7 +1130,24 @@ export function pickPrimarySubject(objects, imgW, imgH, mode, canvas) {
   let bestScore = -1;
   for (let i = 0; i < pool.length; i++) {
     let s = subjectSalience(pool[i], imgW, imgH, m, canvas);
-    // 与上一帧跟踪框 IoU 高 → 轻微加分，减少帧间跳主体
+
+    if (pinnedSubject && pinnedSubject.bbox && pool[i].bbox) {
+      const iou = boxIoU(pinnedSubject.bbox, pool[i].bbox);
+      const px = (pinnedSubject.nx || 0.5) * imgW;
+      const py = (pinnedSubject.ny || 0.5) * imgH;
+      const b = pool[i].bbox;
+      const inside =
+        px >= Math.min(b[0], b[2]) &&
+        px <= Math.max(b[0], b[2]) &&
+        py >= Math.min(b[1], b[3]) &&
+        py <= Math.max(b[1], b[3]);
+      if (inside || iou >= 0.2) {
+        s += 100;
+      } else if (iou >= 0.08) {
+        s += 40;
+      }
+    }
+
     if (trackedSubject && trackedSubject.bbox && pool[i].bbox) {
       const iou = boxIoU(trackedSubject.bbox, pool[i].bbox);
       if (iou >= 0.25) s += m === "portrait" ? 2.2 : 1.4;
@@ -894,9 +1158,43 @@ export function pickPrimarySubject(objects, imgW, imgH, mode, canvas) {
       best = pool[i];
     }
   }
+
+  if (pinnedSubject) {
+    if (
+      best &&
+      best.bbox &&
+      (boxIoU(pinnedSubject.bbox, best.bbox) >= 0.12 ||
+        (function () {
+          const px = (pinnedSubject.nx || 0.5) * imgW;
+          const py = (pinnedSubject.ny || 0.5) * imgH;
+          const b = best.bbox;
+          return (
+            px >= Math.min(b[0], b[2]) &&
+            px <= Math.max(b[0], b[2]) &&
+            py >= Math.min(b[1], b[3]) &&
+            py <= Math.max(b[1], b[3])
+          );
+        })())
+    ) {
+      pinMissStreak = 0;
+      pinnedSubject.bbox = best.bbox.slice();
+      pinnedSubject.label = best.label;
+      pinnedSubject.score = best.score;
+    } else {
+      pinMissStreak += 1;
+      if (pinMissStreak >= 8) {
+        pinnedSubject = null;
+        pinMissStreak = 0;
+      }
+    }
+  }
+
   return best;
 }
 
+/**
+ * 防抖：主体未大变时保持框不变，避免小幅晃动抖动。
+ */
 export function stabilizeSubject(next, imgW, imgH, mode) {
   const m = mode === "portrait" ? "portrait" : "landscape";
   if (m === "portrait" && next && !isPersonLabel(next.label)) {
@@ -906,10 +1204,9 @@ export function stabilizeSubject(next, imgW, imgH, mode) {
     trackedSubject = null;
   }
 
-  // 本帧无检测：短暂保留旧框，连续丢检则清空（避免镜头已移走还钉死旧位置）
   if (!next || !next.bbox) {
     trackMissStreak += 1;
-    if (trackMissStreak >= 3) {
+    if (trackMissStreak >= 4) {
       trackedSubject = null;
       return null;
     }
@@ -926,7 +1223,6 @@ export function stabilizeSubject(next, imgW, imgH, mode) {
     return trackedSubject;
   }
 
-  // 拒绝突然膨胀的「组合大框」，但仍跟随后续合法检测
   const prevArea = boxArea(trackedSubject.bbox);
   const nextArea = boxArea(next.bbox);
   if (
@@ -937,10 +1233,39 @@ export function stabilizeSubject(next, imgW, imgH, mode) {
   }
 
   const iou = boxIoU(trackedSubject.bbox, next.bbox);
+  const pcx =
+    (Math.min(trackedSubject.bbox[0], trackedSubject.bbox[2]) +
+      Math.max(trackedSubject.bbox[0], trackedSubject.bbox[2])) /
+    2;
+  const pcy =
+    (Math.min(trackedSubject.bbox[1], trackedSubject.bbox[3]) +
+      Math.max(trackedSubject.bbox[1], trackedSubject.bbox[3])) /
+    2;
+  const ncx =
+    (Math.min(next.bbox[0], next.bbox[2]) + Math.max(next.bbox[0], next.bbox[2])) /
+    2;
+  const ncy =
+    (Math.min(next.bbox[1], next.bbox[3]) + Math.max(next.bbox[1], next.bbox[3])) /
+    2;
+  const minSide = Math.max(1, Math.min(imgW || 1, imgH || 1));
+  const shift =
+    Math.sqrt((ncx - pcx) * (ncx - pcx) + (ncy - pcy) * (ncy - pcy)) / minSide;
+  const areaDelta =
+    Math.abs(nextArea - prevArea) / Math.max(prevArea, 1);
 
-  // 同主体：高跟随系数，镜头一动框就跟上
-  if (iou >= 0.12) {
-    const t = iou >= 0.35 ? 0.72 : 0.92;
+  // 死区：IoU 高且位移/面积变化小 → 框体完全不动
+  if (iou >= 0.55 && shift < 0.028 && areaDelta < 0.12) {
+    trackedSubject = {
+      label: next.label || trackedSubject.label,
+      score: next.score,
+      bbox: trackedSubject.bbox.slice(),
+    };
+    return trackedSubject;
+  }
+
+  // 同主体缓动：极低跟随，抑制抖动
+  if (iou >= 0.28) {
+    const t = iou >= 0.5 && shift < 0.06 ? 0.08 : 0.18;
     trackedSubject = {
       label: next.label || trackedSubject.label,
       score: next.score,
@@ -949,7 +1274,15 @@ export function stabilizeSubject(next, imgW, imgH, mode) {
     return trackedSubject;
   }
 
-  // IoU 很低 = 镜头大幅移动或换主体：直接切到本帧最优（完整度+中心）
+  if (iou >= 0.12) {
+    trackedSubject = {
+      label: next.label || trackedSubject.label,
+      score: next.score,
+      bbox: lerpBox(trackedSubject.bbox, next.bbox, 0.45),
+    };
+    return trackedSubject;
+  }
+
   trackedSubject = {
     label: next.label,
     score: next.score,
@@ -960,5 +1293,7 @@ export function stabilizeSubject(next, imgW, imgH, mode) {
 
 export function clearTrackedSubject() {
   trackedSubject = null;
+  pinnedSubject = null;
   trackMissStreak = 0;
+  pinMissStreak = 0;
 }

@@ -495,6 +495,10 @@
       height: 100%;
       pointer-events: none;
       z-index: 2;
+      touch-action: manipulation;
+    }
+    #subjectOverlay.interactive {
+      pointer-events: auto;
     }
 
     canvas#shot { display: none; }
@@ -1569,8 +1573,12 @@
       let coachEngine = null;
       let coachDetectGen = 0;
       let coachReanalyzeSoon = false;
+      /** 切模式/焦距等硬重置时顺带清掉点击锁定 */
+      let coachHardReset = false;
       /** 切模式/焦距/镜头时递增，作废进行中的旧检测结果 */
       let coachViewGen = 0;
+      let lastTapObjects = null;
+      let lastTapSize = { w: 1, h: 1 };
 
       function coachAssetUrl(fileName) {
         const pathName = location.pathname || "/";
@@ -1582,7 +1590,7 @@
           base = pathName + "/" + fileName;
         }
         // 同域优先；jsDelivr 作备用（Pages 延迟时）
-        return base + "?v=20260925-track2";
+        return base + "?v=20260925-contour1";
       }
 
       /** 已成功加载过：静默热启动，不闪「下载资源」 */
@@ -1600,6 +1608,7 @@
       function createCoachDownloadTracker() {
         const knownTotals = {
           "efficientdet_lite0.tflite": 7244197,
+          "magic_touch.tflite": 6227884,
         };
         const files = Object.create(null);
         let peakPct = 0;
@@ -1627,6 +1636,7 @@
         }
 
         ensureFile("efficientdet_lite0.tflite");
+        ensureFile("magic_touch.tflite");
 
         function compute() {
           let loaded = 0;
@@ -1733,7 +1743,7 @@
           return coachEngine;
         } catch (_) {
           coachEngine = await import(
-            "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/coach-engine.js?v=20260925-track2"
+            "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/coach-engine.js?v=20260925-contour1"
           );
           return coachEngine;
         }
@@ -1871,6 +1881,36 @@
         return { canvas: c, srcW: w, srcH: h };
       }
 
+      function getHoldOrientation() {
+        try {
+          if (screen.orientation && screen.orientation.type) {
+            return String(screen.orientation.type).indexOf("landscape") >= 0
+              ? "landscape"
+              : "portrait";
+          }
+        } catch (_) {}
+        const size = getStageSize();
+        return size.sw >= size.sh ? "landscape" : "portrait";
+      }
+
+      function mapOverlayToSrc(clientX, clientY, srcW, srcH) {
+        sizeSubjectOverlay();
+        const rect = subjectOverlay.getBoundingClientRect();
+        const ox = clientX - rect.left;
+        const oy = clientY - rect.top;
+        const ow = subjectOverlay.width || rect.width || 1;
+        const oh = subjectOverlay.height || rect.height || 1;
+        const scale = Math.max(ow / srcW, oh / srcH);
+        const dw = srcW * scale;
+        const dh = srcH * scale;
+        const offx = (ow - dw) / 2;
+        const offy = (oh - dh) / 2;
+        return {
+          x: (ox - offx) / scale,
+          y: (oy - offy) / scale,
+        };
+      }
+
       function clearSubjectOverlay() {
         if (!subjectOverlay) return;
         const ctx = subjectOverlay.getContext("2d");
@@ -1895,21 +1935,73 @@
         }
       }
 
-      function drawSubjectBox(bbox, srcW, srcH) {
+      /** 轮廓填充：半透明浅绿 + 描边；无 mask 时退回圆角框填充 */
+      function drawSubjectContour(mask, bbox, srcW, srcH) {
         sizeSubjectOverlay();
         const ctx = subjectOverlay.getContext("2d");
-        if (!ctx || !bbox || bbox.length < 4) {
-          clearSubjectOverlay();
-          return;
-        }
+        if (!ctx) return;
         const ow = subjectOverlay.width;
         const oh = subjectOverlay.height;
-        // object-fit: cover 映射
+        ctx.clearRect(0, 0, ow, oh);
+
         const scale = Math.max(ow / srcW, oh / srcH);
         const dw = srcW * scale;
         const dh = srcH * scale;
         const ox = (ow - dw) / 2;
         const oy = (oh - dh) / 2;
+
+        if (mask && mask.data && mask.width && mask.height) {
+          const mw = mask.width;
+          const mh = mask.height;
+          const img = ctx.createImageData(mw, mh);
+          const px = img.data;
+          const src = mask.data;
+          for (let i = 0; i < mw * mh; i++) {
+            const on = src[i] > 0;
+            const o = i * 4;
+            if (!on) {
+              px[o + 3] = 0;
+              continue;
+            }
+            const x = i % mw;
+            const y = (i / mw) | 0;
+            let edge = false;
+            if (
+              x === 0 ||
+              y === 0 ||
+              x === mw - 1 ||
+              y === mh - 1 ||
+              !src[i - 1] ||
+              !src[i + 1] ||
+              !src[i - mw] ||
+              !src[i + mw]
+            ) {
+              edge = true;
+            }
+            if (edge) {
+              px[o] = 74;
+              px[o + 1] = 222;
+              px[o + 2] = 128;
+              px[o + 3] = 220;
+            } else {
+              px[o] = 74;
+              px[o + 1] = 222;
+              px[o + 2] = 128;
+              px[o + 3] = 55;
+            }
+          }
+          const tmp = document.createElement("canvas");
+          tmp.width = mw;
+          tmp.height = mh;
+          tmp.getContext("2d").putImageData(img, 0, 0);
+          ctx.save();
+          ctx.imageSmoothingEnabled = true;
+          ctx.drawImage(tmp, ox, oy, dw, dh);
+          ctx.restore();
+          return;
+        }
+
+        if (!bbox || bbox.length < 4) return;
         let x1 = bbox[0] * scale + ox;
         let y1 = bbox[1] * scale + oy;
         let x2 = bbox[2] * scale + ox;
@@ -1918,36 +2010,22 @@
         const y = Math.min(y1, y2);
         const bw = Math.abs(x2 - x1);
         const bh = Math.abs(y2 - y1);
-        if (bw < 4 || bh < 4) {
-          clearSubjectOverlay();
-          return;
-        }
-
-        ctx.clearRect(0, 0, ow, oh);
+        if (bw < 4 || bh < 4) return;
+        const r = Math.min(22, bw * 0.18, bh * 0.18);
         ctx.save();
-        // 检测画布已是可见裁切，叠加层不再二次 digitalScale
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(x, y, bw, bh, r);
+        else ctx.rect(x, y, bw, bh);
+        ctx.fillStyle = "rgba(74, 222, 128, 0.22)";
+        ctx.fill();
         ctx.strokeStyle = "#4ade80";
         ctx.lineWidth = Math.max(2, Math.round(ow / 180));
-        ctx.shadowColor = "rgba(74, 222, 128, 0.55)";
-        ctx.shadowBlur = 8;
-        ctx.strokeRect(x, y, bw, bh);
-        ctx.shadowBlur = 0;
-        const corner = Math.min(18, bw * 0.2, bh * 0.2);
-        ctx.beginPath();
-        ctx.moveTo(x, y + corner);
-        ctx.lineTo(x, y);
-        ctx.lineTo(x + corner, y);
-        ctx.moveTo(x + bw - corner, y);
-        ctx.lineTo(x + bw, y);
-        ctx.lineTo(x + bw, y + corner);
-        ctx.moveTo(x + bw, y + bh - corner);
-        ctx.lineTo(x + bw, y + bh);
-        ctx.lineTo(x + bw - corner, y + bh);
-        ctx.moveTo(x + corner, y + bh);
-        ctx.lineTo(x, y + bh);
-        ctx.lineTo(x, y + bh - corner);
         ctx.stroke();
         ctx.restore();
+      }
+
+      function drawSubjectBox(bbox, srcW, srcH) {
+        drawSubjectContour(null, bbox, srcW, srcH);
       }
 
       function pulseCoachBtn() {
@@ -1966,7 +2044,9 @@
         coachViewGen += 1;
         coachTracking = false;
         coachReanalyzeSoon = false;
+        coachHardReset = false;
         coachBtn.classList.remove("active");
+        if (subjectOverlay) subjectOverlay.classList.remove("interactive");
         clearSubjectOverlay();
         setCoachHint("");
         if (coachEngine && coachEngine.clearTrackedSubject) {
@@ -1978,6 +2058,7 @@
       function reanalyzeAssistSubject() {
         if (!coachActive) return;
         coachReanalyzeSoon = true;
+        coachHardReset = true;
         coachViewGen += 1;
         if (coachEngine && coachEngine.clearTrackedSubject) {
           coachEngine.clearTrackedSubject();
@@ -1987,6 +2068,7 @@
 
       async function subjectTrackLoop(gen) {
         coachTracking = true;
+        let lastMask = null;
         while (coachActive && gen === coachDetectGen) {
           if (!stream || document.hidden) {
             await new Promise(function (r) { setTimeout(r, 400); });
@@ -1994,24 +2076,32 @@
           }
           if (coachReanalyzeSoon) {
             coachReanalyzeSoon = false;
-            if (coachEngine && coachEngine.clearTrackedSubject) {
-              coachEngine.clearTrackedSubject();
+            lastMask = null;
+            if (coachHardReset) {
+              coachHardReset = false;
+              if (coachEngine && coachEngine.clearTrackedSubject) {
+                coachEngine.clearTrackedSubject();
+              }
             }
           }
           const viewGen = coachViewGen;
           const modeNow =
             shootMode === "portrait" ? "portrait" : "landscape";
+          const holdNow = getHoldOrientation();
           const started = Date.now();
           try {
             const snap = captureDetectCanvas();
             if (!coachEngine || !coachEngine.detectSubjects) {
               throw new Error("引擎未就绪");
             }
+            if (coachEngine.setHoldOrientation) {
+              coachEngine.setHoldOrientation(holdNow);
+            }
             const vision = await coachEngine.detectSubjects(snap.canvas, null, {
               mode: modeNow,
+              holdOrientation: holdNow,
             });
             if (!coachActive || gen !== coachDetectGen) break;
-            // 切模式/焦距期间的旧结果一律丢弃
             if (viewGen !== coachViewGen) continue;
             if (vision.mode && vision.mode !== modeNow) continue;
             if (
@@ -2029,9 +2119,13 @@
                 snap.canvas
               );
             if (viewGen !== coachViewGen) continue;
+            if (vision.mask) lastMask = vision.mask;
+            lastTapObjects = vision.objects || [];
+            lastTapSize = { w: snap.srcW, h: snap.srcH };
             if (subject && subject.bbox) {
-              drawSubjectBox(subject.bbox, snap.srcW, snap.srcH);
+              drawSubjectContour(lastMask, subject.bbox, snap.srcW, snap.srcH);
             } else {
+              lastMask = null;
               clearSubjectOverlay();
             }
           } catch (_) {
@@ -2039,7 +2133,7 @@
             if (viewGen === coachViewGen) clearSubjectOverlay();
           }
           const elapsed = Date.now() - started;
-          const wait = coachReanalyzeSoon ? 0 : Math.max(0, 80 - elapsed);
+          const wait = coachReanalyzeSoon ? 0 : Math.max(0, 100 - elapsed);
           await new Promise(function (r) { setTimeout(r, wait); });
         }
         if (gen === coachDetectGen) {
@@ -2051,10 +2145,60 @@
         stopSubjectTracking();
         coachActive = true;
         coachBtn.classList.add("active");
+        if (subjectOverlay) subjectOverlay.classList.add("interactive");
         setCoachHint("");
         sizeSubjectOverlay();
         const gen = ++coachDetectGen;
         subjectTrackLoop(gen);
+      }
+
+      async function onSubjectOverlayTap(ev) {
+        if (!coachActive || !coachEngine || !stream) return;
+        ev.preventDefault();
+        try {
+          const snap = captureDetectCanvas();
+          const pt = mapOverlayToSrc(ev.clientX, ev.clientY, snap.srcW, snap.srcH);
+          const modeNow =
+            shootMode === "portrait" ? "portrait" : "landscape";
+          let objects = lastTapObjects;
+          if (!objects || !objects.length) {
+            const vision = await coachEngine.detectSubjects(snap.canvas, null, {
+              mode: modeNow,
+              holdOrientation: getHoldOrientation(),
+            });
+            objects = vision.objects || [];
+            if (vision.primary && vision.primary.bbox) {
+              drawSubjectContour(
+                vision.mask,
+                vision.primary.bbox,
+                snap.srcW,
+                snap.srcH
+              );
+            }
+          }
+          lastTapObjects = objects;
+          lastTapSize = { w: snap.srcW, h: snap.srcH };
+          if (!coachEngine.pinSubjectAt) return;
+          const pinned = coachEngine.pinSubjectAt(
+            objects,
+            pt.x,
+            pt.y,
+            snap.srcW,
+            snap.srcH,
+            modeNow
+          );
+          if (pinned && pinned.bbox) {
+            const mask =
+              coachEngine.segmentSubjectMask &&
+              coachEngine.segmentSubjectMask(
+                snap.canvas,
+                pinned.nx,
+                pinned.ny
+              );
+            drawSubjectContour(mask, pinned.bbox, snap.srcW, snap.srcH);
+            coachReanalyzeSoon = true;
+          }
+        } catch (_) {}
       }
 
       let coachClickLockUntil = 0;
@@ -2109,6 +2253,16 @@
         coachBtn.classList.remove("pressed");
       });
       coachBtn.addEventListener("click", onCoachClick);
+      if (subjectOverlay) {
+        subjectOverlay.addEventListener("click", onSubjectOverlayTap);
+      }
+
+      function onHoldOrientationChange() {
+        scheduleLayoutVideos();
+        if (coachActive) {
+          reanalyzeAssistSubject();
+        }
+      }
 
       gate.addEventListener("click", function () {
         runDeviceProbe();
@@ -2157,7 +2311,15 @@
       window.addEventListener("orientationchange", function () {
         setTimeout(scheduleLayoutVideos, 120);
         setTimeout(scheduleLayoutVideos, 400);
+        setTimeout(onHoldOrientationChange, 180);
       });
+      try {
+        if (screen.orientation && screen.orientation.addEventListener) {
+          screen.orientation.addEventListener("change", function () {
+            setTimeout(onHoldOrientationChange, 80);
+          });
+        }
+      } catch (_) {}
       if (window.visualViewport) {
         window.visualViewport.addEventListener("resize", scheduleLayoutVideos);
       }
