@@ -1569,8 +1569,11 @@
           base = pathName + "/" + fileName;
         }
         // 同域优先；jsDelivr 作备用（Pages 延迟时）
-        return base + "?v=20260925-mode1";
+        return base + "?v=20260925-track2";
       }
+
+      /** 已成功加载过：静默热启动，不闪「下载资源」 */
+      let coachLoadSilent = false;
 
       function setCoachHint(text) {
         if (coachHint) coachHint.textContent = text || "";
@@ -1677,8 +1680,8 @@
 
       function handleCoachProgress(msg) {
         if (!msg) return;
-        // 本地缓存加载也会回调 progress，不能当成「正在下载」
-        if (msg.fromCache) {
+        // 本地缓存 / 静默热启动：绝不闪「下载资源」
+        if (msg.fromCache || coachLoadSilent) {
           if (msg.status === "ready") {
             setCoachBtnProgress(0);
             setCoachHint("");
@@ -1717,7 +1720,7 @@
           return coachEngine;
         } catch (_) {
           coachEngine = await import(
-            "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/coach-engine.js?v=20260925-mode1"
+            "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/coach-engine.js?v=20260925-track2"
           );
           return coachEngine;
         }
@@ -1730,6 +1733,7 @@
         coachBtn.classList.add("loading");
         coachBtn.classList.remove("active");
         coachDownloadTracker = null;
+        coachLoadSilent = false;
 
         try {
           const engine = await ensureCoachEngine();
@@ -1747,7 +1751,8 @@
             }
           } catch (_) {}
 
-          // 仅「未成功加载过」时显示下载进度；已就绪静默加载，不打扰
+          // 仅首次下载显示进度；已就绪则静默热启动
+          coachLoadSilent = fromCacheLikely;
           if (fromCacheLikely) {
             setCoachBtnProgress(0);
             setCoachHint("");
@@ -1758,6 +1763,7 @@
 
           await engine.loadCoach(handleCoachProgress);
           coachReady = true;
+          coachLoadSilent = false;
           setCoachBtnProgress(0);
           setCoachHint("");
           try {
@@ -1765,6 +1771,7 @@
           } catch (_) {}
           return true;
         } catch (err) {
+          coachLoadSilent = false;
           try {
             if (coachEngine && coachEngine.flushActiveDownloads) {
               await coachEngine.flushActiveDownloads();
@@ -1793,7 +1800,10 @@
         }
       }
 
-      /** 仅在明确有半成品、且本地缓存未齐时自动续传；有完整缓存则清掉半成品防死循环 */
+      /**
+       * 进拍摄页：若模型已就绪则静默热启动（点一下就能开辅助）；
+       * 仅有半成品时才自动续传。
+       */
       async function maybeAutoResumeCoachDownload() {
         if (!deviceReport || !deviceReport.assistOk) return;
         if (coachReady || coachLoading) return;
@@ -1805,6 +1815,7 @@
               if (engine.clearResumePartials) {
                 await engine.clearResumePartials();
               }
+              await ensureCoachModelLoaded();
               return;
             }
           }
@@ -1822,7 +1833,7 @@
         const vw = video.videoWidth;
         const vh = video.videoHeight;
         if (!vw || !vh) throw new Error("画面还没就绪");
-        const maxSide = 320;
+        const maxSide = 384;
         const scale = Math.min(1, maxSide / Math.max(vw, vh));
         const w = Math.max(1, Math.round(vw * scale));
         const h = Math.max(1, Math.round(vh * scale));
@@ -2016,18 +2027,17 @@
 
         coachClickBusy = true;
         try {
-          if (!coachReady) {
-            const ok = await ensureCoachModelLoaded();
-            if (!ok) return;
-            // 下载完成后不自动开启，等用户再点一次
-            return;
-          }
-
           if (coachActive) {
             stopSubjectTracking();
             return;
           }
 
+          if (!coachReady) {
+            const ok = await ensureCoachModelLoaded();
+            if (!ok) return;
+          }
+
+          // 资源就绪后直接开启，无需再点一次
           startSubjectTracking();
         } finally {
           coachClickBusy = false;

@@ -270,8 +270,8 @@ async function createDetector(onProgress) {
         modelAssetBuffer: modelBuffer,
         delegate: "CPU",
       },
-      scoreThreshold: 0.32,
-      maxResults: 12,
+      scoreThreshold: 0.26,
+      maxResults: 16,
       runningMode: "VIDEO",
       // 默认风景：不限制类别；人像模式切换时再 setOptions 只留 person
     });
@@ -282,8 +282,8 @@ async function createDetector(onProgress) {
         modelAssetBuffer: modelBuffer,
         delegate: "GPU",
       },
-      scoreThreshold: 0.32,
-      maxResults: 12,
+      scoreThreshold: 0.26,
+      maxResults: 16,
       runningMode: "VIDEO",
     });
     deviceUsed = "webgl";
@@ -413,45 +413,300 @@ function boxCompleteness(b, imgW, imgH) {
   if (y1 <= margin) score -= 0.28;
   if (x2 >= w - margin) score -= 0.28;
   if (y2 >= h - margin) score -= 0.28;
-  // 硬裁切（坐标越界）再扣
   if (x1 < 0 || y1 < 0 || x2 > w || y2 > h) score -= 0.15;
   return Math.max(0, Math.min(1, score));
 }
 
+/** 框中心到画面中心的接近度 0–1 */
+function boxCenterScore(b, imgW, imgH) {
+  const w = Math.max(1, imgW || 1);
+  const h = Math.max(1, imgH || 1);
+  const cx = (Math.min(b[0], b[2]) + Math.max(b[0], b[2])) / 2;
+  const cy = (Math.min(b[1], b[3]) + Math.max(b[1], b[3])) / 2;
+  const dx = (cx - w * 0.5) / w;
+  const dy = (cy - h * 0.5) / h;
+  return 1 - Math.min(1, Math.sqrt(dx * dx + dy * dy) * 1.35);
+}
+
 /**
- * 主体权重：① 完整度最高 ② 最接近画面中心。
- * mode=portrait：只服务人像；mode=landscape：全类别主体，不强制偏人。
+ * 三分法兴趣点接近度（摄影构图常用）：离四个交叉点越近越好。
+ * 参考移动端实时构图评分研究。
  */
-function subjectSalience(obj, imgW, imgH, mode) {
+function boxRuleOfThirdsScore(b, imgW, imgH) {
+  const w = Math.max(1, imgW || 1);
+  const h = Math.max(1, imgH || 1);
+  const cx = (Math.min(b[0], b[2]) + Math.max(b[0], b[2])) / 2;
+  const cy = (Math.min(b[1], b[3]) + Math.max(b[1], b[3])) / 2;
+  const xs = [w / 3, (2 * w) / 3];
+  const ys = [h / 3, (2 * h) / 3];
+  let best = 0;
+  for (let i = 0; i < 2; i++) {
+    for (let j = 0; j < 2; j++) {
+      const dx = (cx - xs[i]) / w;
+      const dy = (cy - ys[j]) / h;
+      const near = 1 - Math.min(1, Math.sqrt(dx * dx + dy * dy) * 2.2);
+      if (near > best) best = near;
+    }
+  }
+  return best;
+}
+
+/**
+ * 轻量「显著性」代理：框内颜色相对周围边环的对比度。
+ * 类 SOD 思路，不引入额外模型（省 iPhone 内存）。
+ */
+function regionContrastScore(canvas, bbox) {
+  if (!canvas || !bbox || typeof canvas.getContext !== "function") return 0.5;
+  let ctx;
+  try {
+    ctx = canvas.getContext("2d", { willReadFrequently: true });
+  } catch (_) {
+    ctx = canvas.getContext("2d");
+  }
+  if (!ctx) return 0.5;
+
+  const W = canvas.width | 0;
+  const H = canvas.height | 0;
+  if (W < 8 || H < 8) return 0.5;
+
+  const x1 = Math.max(0, Math.floor(Math.min(bbox[0], bbox[2])));
+  const y1 = Math.max(0, Math.floor(Math.min(bbox[1], bbox[3])));
+  const x2 = Math.min(W, Math.ceil(Math.max(bbox[0], bbox[2])));
+  const y2 = Math.min(H, Math.ceil(Math.max(bbox[1], bbox[3])));
+  const bw = x2 - x1;
+  const bh = y2 - y1;
+  if (bw < 6 || bh < 6) return 0.35;
+
+  function meanRGB(sx, sy, sw, sh) {
+    const w = Math.max(1, Math.min(sw, W - sx));
+    const h = Math.max(1, Math.min(sh, H - sy));
+    if (sx < 0 || sy < 0 || sx >= W || sy >= H) return null;
+    let data;
+    try {
+      data = ctx.getImageData(sx, sy, w, h).data;
+    } catch (_) {
+      return null;
+    }
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    let n = 0;
+    const step = Math.max(4, Math.floor((data.length / 4) / 48) * 4);
+    for (let i = 0; i < data.length; i += step) {
+      r += data[i];
+      g += data[i + 1];
+      b += data[i + 2];
+      n += 1;
+    }
+    if (!n) return null;
+    return [r / n, g / n, b / n];
+  }
+
+  const pad = Math.max(2, Math.round(Math.min(bw, bh) * 0.12));
+  const inner = meanRGB(
+    x1 + pad,
+    y1 + pad,
+    Math.max(1, bw - pad * 2),
+    Math.max(1, bh - pad * 2)
+  );
+  if (!inner) return 0.5;
+
+  const rings = [
+    meanRGB(Math.max(0, x1 - pad), y1, pad, bh),
+    meanRGB(x2, y1, pad, bh),
+    meanRGB(x1, Math.max(0, y1 - pad), bw, pad),
+    meanRGB(x1, y2, bw, pad),
+  ];
+  let dr = 0;
+  let count = 0;
+  for (let i = 0; i < rings.length; i++) {
+    const o = rings[i];
+    if (!o) continue;
+    const d =
+      Math.abs(inner[0] - o[0]) +
+      Math.abs(inner[1] - o[1]) +
+      Math.abs(inner[2] - o[2]);
+    dr += d / (3 * 255);
+    count += 1;
+  }
+  if (!count) return 0.5;
+  return Math.max(0, Math.min(1, (dr / count) * 2.2));
+}
+
+/** 风景：常见「可拍主体」类别加权；家具/场景平面降权（避免沙发/墙面抢框） */
+const LANDSCAPE_SUBJECT_BOOST = {
+  bird: 1.35,
+  cat: 1.35,
+  dog: 1.35,
+  horse: 1.2,
+  sheep: 1.15,
+  cow: 1.15,
+  elephant: 1.2,
+  bear: 1.25,
+  zebra: 1.2,
+  giraffe: 1.2,
+  "potted plant": 1.3,
+  vase: 1.25,
+  bottle: 1.15,
+  cup: 1.1,
+  bowl: 1.1,
+  "wine glass": 1.1,
+  cake: 1.2,
+  "teddy bear": 1.25,
+  "sports ball": 1.2,
+  frisbee: 1.15,
+  kite: 1.2,
+  umbrella: 1.1,
+  backpack: 1.05,
+  handbag: 1.05,
+  suitcase: 1.05,
+  bicycle: 1.15,
+  motorcycle: 1.1,
+  boat: 1.15,
+  airplane: 1.1,
+  car: 1.05,
+  clock: 1.1,
+  book: 1.05,
+  "cell phone": 1.05,
+  laptop: 1.05,
+  banana: 1.1,
+  apple: 1.1,
+  orange: 1.1,
+  sandwich: 1.05,
+  pizza: 1.05,
+  donut: 1.05,
+  "hot dog": 1.05,
+  broccoli: 1.05,
+  carrot: 1.05,
+};
+
+const LANDSCAPE_BG_PENALTY = {
+  couch: 0.35,
+  sofa: 0.35,
+  bed: 0.4,
+  "dining table": 0.3,
+  table: 0.45,
+  chair: 0.55,
+  bench: 0.55,
+  refrigerator: 0.35,
+  oven: 0.4,
+  microwave: 0.45,
+  sink: 0.4,
+  toilet: 0.35,
+  tv: 0.45,
+  "tvmonitor": 0.45,
+  "traffic light": 0.5,
+  "stop sign": 0.55,
+  "fire hydrant": 0.7,
+  "parking meter": 0.55,
+  truck: 0.7,
+  bus: 0.65,
+  train: 0.65,
+};
+
+function landscapeClassWeight(label) {
+  const lab = String(label || "").toLowerCase().trim();
+  if (LANDSCAPE_SUBJECT_BOOST[lab] != null) return LANDSCAPE_SUBJECT_BOOST[lab];
+  if (LANDSCAPE_BG_PENALTY[lab] != null) return LANDSCAPE_BG_PENALTY[lab];
+  if (isPersonLabel(lab)) return 0.72; // 风景不优先路人
+  return 1;
+}
+
+/**
+ * 人像策略：只框人。
+ * 权重：① 身体完整度（少裁切）② 接近画面中心 ③ 合适占比 + 人形长宽比。
+ * 参考：单人视频管线用 conf / area / completeness / 跟踪位置排序。
+ */
+function portraitSalience(obj, imgW, imgH) {
   const b = obj && obj.bbox;
   if (!b || b.length < 4) return -1;
+  if (!isPersonLabel(obj.label)) return -1;
+
   const w = Math.max(1, imgW || 1);
   const h = Math.max(1, imgH || 1);
   const frameArea = w * h;
   const bw = Math.abs(b[2] - b[0]);
   const bh = Math.abs(b[3] - b[1]);
-  const area = bw * bh;
-  const areaRatio = area / frameArea;
-  if (areaRatio < 0.02) return -1;
-  if (areaRatio > 0.7) return -1;
-
-  const person = isPersonLabel(obj.label);
-  if (mode === "portrait" && !person) return -1;
+  const areaRatio = (bw * bh) / frameArea;
+  if (areaRatio < 0.03 || areaRatio > 0.78) return -1;
 
   const completeness = boxCompleteness(b, w, h);
-  const cx = (Math.min(b[0], b[2]) + Math.max(b[0], b[2])) / 2;
-  const cy = (Math.min(b[1], b[3]) + Math.max(b[1], b[3])) / 2;
-  const dx = (cx - w * 0.5) / w;
-  const dy = (cy - h * 0.5) / h;
-  const center = 1 - Math.min(1, Math.sqrt(dx * dx + dy * dy) * 1.35);
+  const center = boxCenterScore(b, w, h);
   const conf = Math.max(0, Math.min(1, Number(obj.score) || 0));
+  const aspect = bw / Math.max(bh, 1);
 
-  // 完整度为主（×10 档），中心次之；置信度仅微调
-  let classBoost = 1;
-  if (mode === "portrait") classBoost = 1.05;
-  else if (person) classBoost = 0.9;
+  // 全身偏竖、半身略宽都可；过扁多为误检
+  let shape = 0.7;
+  if (aspect >= 0.22 && aspect <= 0.72) shape = 1.25;
+  else if (aspect > 0.72 && aspect <= 1.05) shape = 1.05;
+  else if (aspect > 1.2) shape = 0.4;
 
-  return (completeness * 10 + center * 2.5 + conf * 0.4) * classBoost;
+  const sizeSweet =
+    areaRatio < 0.08
+      ? areaRatio / 0.08
+      : areaRatio <= 0.45
+        ? 1
+        : Math.max(0.2, 1 - (areaRatio - 0.45) / 0.35);
+
+  // 完整度主导，中心其次
+  return (
+    completeness * 12 +
+    center * 3.2 +
+    sizeSweet * 1.4 +
+    shape * 0.9 +
+    conf * 0.8
+  );
+}
+
+/**
+ * 风景策略：类显著目标（SOD）选独立主体，不强制人。
+ * 权重：① 完整度 ② 中心 / 三分法 ③ 区域对比度 ④ 类别先验 ⑤ 中等尺寸甜区。
+ * 依据：移动端构图与 SOD 综述——突出前景、避开场景平面。
+ */
+function landscapeSalience(obj, imgW, imgH, canvas) {
+  const b = obj && obj.bbox;
+  if (!b || b.length < 4) return -1;
+
+  const w = Math.max(1, imgW || 1);
+  const h = Math.max(1, imgH || 1);
+  const frameArea = w * h;
+  const bw = Math.abs(b[2] - b[0]);
+  const bh = Math.abs(b[3] - b[1]);
+  const areaRatio = (bw * bh) / frameArea;
+  if (areaRatio < 0.018 || areaRatio > 0.62) return -1;
+
+  const completeness = boxCompleteness(b, w, h);
+  const center = boxCenterScore(b, w, h);
+  const thirds = boxRuleOfThirdsScore(b, w, h);
+  const conf = Math.max(0, Math.min(1, Number(obj.score) || 0));
+  const contrast = regionContrastScore(canvas, b);
+  const classW = landscapeClassWeight(obj.label);
+  const aspect = bw / Math.max(bh, 1);
+  const shape = aspect > 2.4 || aspect < 0.12 ? 0.55 : 1;
+
+  const sizeSweet =
+    areaRatio < 0.06
+      ? areaRatio / 0.06
+      : areaRatio <= 0.35
+        ? 1
+        : Math.max(0.15, 1 - (areaRatio - 0.35) / 0.3);
+
+  const placement = Math.max(center, thirds * 0.95);
+
+  return (
+    (completeness * 10 +
+      placement * 3 +
+      contrast * 2.4 +
+      sizeSweet * 1.5 +
+      conf * 0.7) *
+    classW *
+    shape
+  );
+}
+
+function subjectSalience(obj, imgW, imgH, mode, canvas) {
+  if (mode === "portrait") return portraitSalience(obj, imgW, imgH);
+  return landscapeSalience(obj, imgW, imgH, canvas);
 }
 
 function intersectionArea(a, b) {
@@ -574,7 +829,13 @@ export async function detectSubjects(source, onProgress, options) {
     });
   }
 
-  const primaryRaw = pickPrimarySubject(objects, canvas.width, canvas.height, mode);
+  const primaryRaw = pickPrimarySubject(
+    objects,
+    canvas.width,
+    canvas.height,
+    mode,
+    canvas
+  );
   const primary = stabilizeSubject(primaryRaw, canvas.width, canvas.height, mode);
 
   return {
@@ -598,10 +859,11 @@ export async function analyzeFrame(source, onProgress, options) {
 }
 
 /**
- * 风景：全类别里挑一个独立主体（不强制人）
+ * 风景：类 SOD + 构图先验，挑一个独立主体（不强制人）
  * 人像：只框人；没人则返回 null
+ * @param {HTMLCanvasElement=} canvas 可选，用于风景对比度打分
  */
-export function pickPrimarySubject(objects, imgW, imgH, mode) {
+export function pickPrimarySubject(objects, imgW, imgH, mode, canvas) {
   const list = objects || [];
   if (!list.length) return null;
   const m = mode === "portrait" ? "portrait" : "landscape";
@@ -620,7 +882,13 @@ export function pickPrimarySubject(objects, imgW, imgH, mode) {
   let best = null;
   let bestScore = -1;
   for (let i = 0; i < pool.length; i++) {
-    const s = subjectSalience(pool[i], imgW, imgH, m);
+    let s = subjectSalience(pool[i], imgW, imgH, m, canvas);
+    // 与上一帧跟踪框 IoU 高 → 轻微加分，减少帧间跳主体
+    if (trackedSubject && trackedSubject.bbox && pool[i].bbox) {
+      const iou = boxIoU(trackedSubject.bbox, pool[i].bbox);
+      if (iou >= 0.25) s += m === "portrait" ? 2.2 : 1.4;
+      else if (iou >= 0.12) s += m === "portrait" ? 1.0 : 0.6;
+    }
     if (s > bestScore) {
       bestScore = s;
       best = pool[i];
