@@ -1263,8 +1263,8 @@ export function stabilizeSubject(next, imgW, imgH, mode) {
   const areaDelta =
     Math.abs(nextArea - prevArea) / Math.max(prevArea, 1);
 
-  // 死区：IoU 高且位移/面积变化小 → 框体完全不动
-  if (iou >= 0.55 && shift < 0.028 && areaDelta < 0.12) {
+  // 死区加宽：轻微晃动完全不改框
+  if (iou >= 0.5 && shift < 0.045 && areaDelta < 0.16) {
     trackedSubject = {
       label: next.label || trackedSubject.label,
       score: next.score,
@@ -1273,9 +1273,9 @@ export function stabilizeSubject(next, imgW, imgH, mode) {
     return trackedSubject;
   }
 
-  // 同主体缓动：极低跟随，抑制抖动
+  // 同主体缓动：极低跟随
   if (iou >= 0.28) {
-    const t = iou >= 0.5 && shift < 0.06 ? 0.08 : 0.18;
+    const t = iou >= 0.48 && shift < 0.08 ? 0.05 : 0.12;
     trackedSubject = {
       label: next.label || trackedSubject.label,
       score: next.score,
@@ -1288,7 +1288,7 @@ export function stabilizeSubject(next, imgW, imgH, mode) {
     trackedSubject = {
       label: next.label || trackedSubject.label,
       score: next.score,
-      bbox: lerpBox(trackedSubject.bbox, next.bbox, 0.45),
+      bbox: lerpBox(trackedSubject.bbox, next.bbox, 0.32),
     };
     return trackedSubject;
   }

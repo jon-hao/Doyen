@@ -544,7 +544,7 @@
       }
     }
 
-    /* 风景构图引导：细边框 + 中央半透明箭头与评级 */
+    /* 风景构图引导：贴边细框 + 四角双箭头 */
     #compGuide {
       position: absolute;
       inset: 0;
@@ -557,97 +557,93 @@
     }
     #compFrame {
       position: absolute;
-      inset: 10px;
-      border: 1.5px solid rgba(239, 68, 68, 0.55);
-      border-radius: 2px;
+      inset: 0;
+      border: 2px solid rgba(239, 68, 68, 0.25);
+      border-radius: 0;
       box-sizing: border-box;
       transition: border-color 0.25s ease;
+      pointer-events: none;
     }
-    #compCenter {
+    .comp-corner {
       position: absolute;
-      left: 50%;
-      top: 50%;
-      width: 120px;
-      height: 120px;
-      transform: translate(-50%, -50%);
+      width: 52px;
+      height: 52px;
+      pointer-events: none;
     }
-    #compGrade {
-      position: absolute;
-      left: 50%;
-      top: 50%;
-      transform: translate(-50%, -50%);
-      font-size: 28px;
-      font-weight: 700;
-      letter-spacing: 0.04em;
-      color: rgba(255, 255, 255, 0.42);
-      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
-      line-height: 1;
-      transition: color 0.25s ease;
+    .comp-corner.tl {
+      left: 10px;
+      top: calc(10px + var(--safe-top));
+    }
+    .comp-corner.tr {
+      right: 10px;
+      top: calc(10px + var(--safe-top));
+    }
+    .comp-corner.bl {
+      left: 10px;
+      bottom: calc(120px + var(--safe-bottom));
+    }
+    .comp-corner.br {
+      right: 10px;
+      bottom: calc(120px + var(--safe-bottom));
     }
     .comp-arrow {
       position: absolute;
-      width: 28px;
-      height: 28px;
-      display: grid;
+      width: 22px;
+      height: 22px;
+      display: none;
       place-items: center;
-      font-size: 18px;
+      font-size: 16px;
       line-height: 1;
-      color: rgba(255, 255, 255, 0.22);
-      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
-      transition: color 0.2s ease, opacity 0.2s ease, transform 0.2s ease;
-      opacity: 0.35;
+      color: rgba(255, 255, 255, 0.38);
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
+      opacity: 0;
     }
-    .comp-arrow.up {
-      left: 50%;
-      top: 4px;
-      transform: translateX(-50%);
+    .comp-arrow.show {
+      display: grid;
+      opacity: 0.55;
+      animation: compCornerPulse 1s ease-in-out infinite;
     }
-    .comp-arrow.down {
-      left: 50%;
-      bottom: 4px;
-      transform: translateX(-50%);
+    .comp-corner.tl .comp-arrow[data-dir="up"] {
+      left: 22px;
+      top: 0;
     }
-    .comp-arrow.left {
-      left: 4px;
-      top: 50%;
-      transform: translateY(-50%);
+    .comp-corner.tl .comp-arrow[data-dir="left"] {
+      left: 0;
+      top: 22px;
     }
-    .comp-arrow.right {
-      right: 4px;
-      top: 50%;
-      transform: translateY(-50%);
+    .comp-corner.tr .comp-arrow[data-dir="up"] {
+      right: 22px;
+      top: 0;
     }
-    .comp-arrow.active {
-      opacity: 0.7;
-      color: rgba(255, 255, 255, 0.55);
+    .comp-corner.tr .comp-arrow[data-dir="right"] {
+      right: 0;
+      top: 22px;
     }
-    .comp-arrow.active.pulse {
-      animation: compArrowPulse 1.1s ease-in-out infinite;
+    .comp-corner.bl .comp-arrow[data-dir="down"] {
+      left: 22px;
+      bottom: 0;
     }
-    @keyframes compArrowPulse {
+    .comp-corner.bl .comp-arrow[data-dir="left"] {
+      left: 0;
+      bottom: 22px;
+    }
+    .comp-corner.br .comp-arrow[data-dir="down"] {
+      right: 22px;
+      bottom: 0;
+    }
+    .comp-corner.br .comp-arrow[data-dir="right"] {
+      right: 0;
+      bottom: 22px;
+    }
+    @keyframes compCornerPulse {
       0%,
       100% {
-        transform: translateX(-50%) scale(1);
-        opacity: 0.45;
+        opacity: 0.35;
+        transform: scale(1);
       }
       50% {
-        transform: translateX(-50%) scale(1.12);
-        opacity: 0.75;
-      }
-    }
-    .comp-arrow.left.active.pulse,
-    .comp-arrow.right.active.pulse {
-      animation-name: compArrowPulseX;
-    }
-    @keyframes compArrowPulseX {
-      0%,
-      100% {
-        transform: translateY(-50%) scale(1);
-        opacity: 0.45;
-      }
-      50% {
-        transform: translateY(-50%) scale(1.12);
-        opacity: 0.75;
+        opacity: 0.7;
+        transform: scale(1.14);
       }
     }
     #compFocalHint {
@@ -672,6 +668,50 @@
       opacity: 1;
     }
 
+    /* 拍照后全屏预览 */
+    #review {
+      position: absolute;
+      inset: 0;
+      z-index: 40;
+      display: none;
+      flex-direction: column;
+      background: #000;
+    }
+    #review.show {
+      display: flex;
+    }
+    #reviewImg {
+      flex: 1;
+      width: 100%;
+      object-fit: contain;
+      background: #000;
+      pointer-events: none;
+    }
+    #reviewActions {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      padding: 16px 24px calc(22px + var(--safe-bottom));
+      pointer-events: auto;
+    }
+    #reviewActions button {
+      min-width: 120px;
+      height: 48px;
+      border: 0;
+      border-radius: 999px;
+      font-size: 16px;
+      font-weight: 600;
+    }
+    #reviewCancel {
+      background: rgba(255, 255, 255, 0.16);
+      color: rgba(255, 255, 255, 0.9);
+    }
+    #reviewSave {
+      background: rgba(255, 255, 255, 0.92);
+      color: #111;
+    }
+
     canvas#shot { display: none; }
 
   </style>
@@ -691,14 +731,30 @@
       <div id="tapFocus" aria-hidden="true"></div>
       <div id="compGuide" aria-hidden="true">
         <div id="compFrame"></div>
-        <div id="compCenter">
-          <div class="comp-arrow up" data-dir="up">▲</div>
-          <div class="comp-arrow down" data-dir="down">▼</div>
-          <div class="comp-arrow left" data-dir="left">◀</div>
-          <div class="comp-arrow right" data-dir="right">▶</div>
-          <div id="compGrade">B</div>
+        <div class="comp-corner tl">
+          <span class="comp-arrow" data-dir="up">▲</span>
+          <span class="comp-arrow" data-dir="left">◀</span>
+        </div>
+        <div class="comp-corner tr">
+          <span class="comp-arrow" data-dir="up">▲</span>
+          <span class="comp-arrow" data-dir="right">▶</span>
+        </div>
+        <div class="comp-corner bl">
+          <span class="comp-arrow" data-dir="down">▼</span>
+          <span class="comp-arrow" data-dir="left">◀</span>
+        </div>
+        <div class="comp-corner br">
+          <span class="comp-arrow" data-dir="down">▼</span>
+          <span class="comp-arrow" data-dir="right">▶</span>
         </div>
         <div id="compFocalHint"></div>
+      </div>
+    </div>
+    <div id="review" aria-hidden="true">
+      <img id="reviewImg" alt="预览" />
+      <div id="reviewActions">
+        <button type="button" id="reviewCancel">取消</button>
+        <button type="button" id="reviewSave">保存</button>
       </div>
     </div>
     <canvas id="shot"></canvas>
@@ -754,8 +810,11 @@
       const tapFocus = document.getElementById("tapFocus");
       const compGuide = document.getElementById("compGuide");
       const compFrame = document.getElementById("compFrame");
-      const compGrade = document.getElementById("compGrade");
       const compFocalHint = document.getElementById("compFocalHint");
+      const review = document.getElementById("review");
+      const reviewImg = document.getElementById("reviewImg");
+      const reviewCancel = document.getElementById("reviewCancel");
+      const reviewSave = document.getElementById("reviewSave");
       const toast = document.getElementById("toast");
       const gate = document.getElementById("gate");
       const secureHint = document.getElementById("secureHint");
@@ -1732,26 +1791,76 @@
         showToast(isIOS() ? "请用分享菜单存到照片" : "已下载", "ok");
       }
 
+      let pendingReviewBlob = null;
+      let pendingReviewUrl = null;
+
+      function closeReview() {
+        if (review) {
+          review.classList.remove("show");
+          review.setAttribute("aria-hidden", "true");
+        }
+        if (pendingReviewUrl) {
+          URL.revokeObjectURL(pendingReviewUrl);
+          pendingReviewUrl = null;
+        }
+        pendingReviewBlob = null;
+        if (reviewImg) reviewImg.removeAttribute("src");
+        if (controls) controls.classList.add("show");
+      }
+
+      function openReview(blob) {
+        if (!review || !reviewImg) return;
+        if (pendingReviewUrl) URL.revokeObjectURL(pendingReviewUrl);
+        pendingReviewBlob = blob;
+        pendingReviewUrl = URL.createObjectURL(blob);
+        reviewImg.src = pendingReviewUrl;
+        if (controls) controls.classList.remove("show");
+        review.classList.add("show");
+        review.setAttribute("aria-hidden", "false");
+      }
+
       async function onShutter() {
         if (capturing || !stream) return;
+        if (review && review.classList.contains("show")) return;
         capturing = true;
         shutter.disabled = true;
         blinkFlash();
         try {
           captureFrame();
           const blob = await canvasToBlob();
-          const name =
-            "doyen-" +
-            new Date().toISOString().replace(/[:.]/g, "-") +
-            ".jpg";
-          await savePhoto(blob, name);
+          openReview(blob);
         } catch (err) {
-          if (err && err.name === "AbortError") showToast("未保存");
-          else showToast((err && err.message) || "拍照失败", "err");
+          showToast((err && err.message) || "拍照失败", "err");
         } finally {
           capturing = false;
           shutter.disabled = false;
         }
+      }
+
+      async function onReviewSave() {
+        if (!pendingReviewBlob) {
+          closeReview();
+          return;
+        }
+        const name =
+          "doyen-" +
+          new Date().toISOString().replace(/[:.]/g, "-") +
+          ".jpg";
+        try {
+          await savePhoto(pendingReviewBlob, name);
+          closeReview();
+        } catch (err) {
+          if (err && err.name === "AbortError") {
+            closeReview();
+            return;
+          }
+          showToast((err && err.message) || "保存失败", "err");
+          closeReview();
+        }
+      }
+
+      function onReviewCancel() {
+        closeReview();
       }
 
 
@@ -1782,7 +1891,7 @@
           base = pathName + "/" + fileName;
         }
         // 同域优先；jsDelivr 作备用（Pages 延迟时）
-        return base + "?v=20260925-comp1";
+        return base + "?v=20260925-comp2";
       }
 
       /** 已成功加载过：静默热启动，不闪「下载资源」 */
@@ -1935,7 +2044,7 @@
           return coachEngine;
         } catch (_) {
           coachEngine = await import(
-            "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/coach-engine.js?v=20260925-comp1"
+            "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/coach-engine.js?v=20260925-comp2"
           );
           return coachEngine;
         }
@@ -1995,27 +2104,29 @@
 
         compGuide.classList.add("show");
         compGuide.setAttribute("aria-hidden", "false");
-        if (compFrame) compFrame.style.borderColor = guide.color;
-        if (compGrade) {
-          compGrade.textContent = guide.grade;
-          compGrade.style.color =
-            guide.grade === "S"
-              ? "rgba(74, 222, 128, 0.5)"
-              : guide.grade === "A"
-                ? "rgba(250, 204, 21, 0.48)"
-                : "rgba(248, 113, 113, 0.48)";
+        if (compFrame) {
+          // 75% 透明 ≈ alpha 0.25
+          const a = "0.25";
+          if (guide.grade === "S") {
+            compFrame.style.borderColor = "rgba(74, 222, 128, " + a + ")";
+          } else if (guide.grade === "A") {
+            compFrame.style.borderColor = "rgba(250, 204, 21, " + a + ")";
+          } else {
+            compFrame.style.borderColor = "rgba(239, 68, 68, " + a + ")";
+          }
         }
 
         const dirs = ["up", "down", "left", "right"];
         for (let i = 0; i < dirs.length; i++) {
           const dir = dirs[i];
-          const el = compGuide.querySelector(".comp-arrow." + dir);
-          if (!el) continue;
           const strength = guide.arrows[dir] || 0;
           const on = strength >= 0.18;
-          el.classList.toggle("active", on);
-          el.classList.toggle("pulse", strength >= 0.35);
-          el.style.opacity = on ? String(0.35 + strength * 0.4) : "0.22";
+          const nodes = compGuide.querySelectorAll(
+            '.comp-arrow[data-dir="' + dir + '"]'
+          );
+          Array.prototype.forEach.call(nodes, function (el) {
+            el.classList.toggle("show", on);
+          });
         }
 
         if (compFocalHint) {
@@ -2246,7 +2357,124 @@
         }
       }
 
-      /** 轮廓填充：半透明浅绿 + 描边；无 mask 时退回圆角框填充 */
+      /** Moore 邻域追踪：得到闭合轮廓点列（掩码坐标） */
+      function traceMaskContour(data, mw, mh) {
+        function on(x, y) {
+          if (x < 0 || y < 0 || x >= mw || y >= mh) return false;
+          return data[y * mw + x] > 0;
+        }
+        let sx = -1;
+        let sy = -1;
+        outer: for (let y = 0; y < mh; y++) {
+          for (let x = 0; x < mw; x++) {
+            if (on(x, y) && (!on(x - 1, y) || !on(x, y - 1))) {
+              sx = x;
+              sy = y;
+              break outer;
+            }
+          }
+        }
+        if (sx < 0) return null;
+
+        // 8 邻域顺时针：从左开始
+        const dx = [-1, -1, 0, 1, 1, 1, 0, -1];
+        const dy = [0, -1, -1, -1, 0, 1, 1, 1];
+        const pts = [];
+        let x = sx;
+        let y = sy;
+        let dir = 0;
+        const maxSteps = mw * mh * 2;
+        for (let step = 0; step < maxSteps; step++) {
+          pts.push([x + 0.5, y + 0.5]);
+          let found = false;
+          // 从进入方向的后方开始搜，保证贴边
+          const start = (dir + 6) % 8;
+          for (let k = 0; k < 8; k++) {
+            const nd = (start + k) % 8;
+            const nx = x + dx[nd];
+            const ny = y + dy[nd];
+            if (on(nx, ny)) {
+              x = nx;
+              y = ny;
+              dir = nd;
+              found = true;
+              break;
+            }
+          }
+          if (!found) break;
+          if (x === sx && y === sy && pts.length > 8) break;
+        }
+        if (pts.length < 8) return null;
+        return pts;
+      }
+
+      function maskOverlapRatio(a, b) {
+        if (!a || !b || a.width !== b.width || a.height !== b.height) return 0;
+        const n = a.data.length;
+        let inter = 0;
+        let uni = 0;
+        const step = Math.max(1, (n / 12000) | 0);
+        for (let i = 0; i < n; i += step) {
+          const aa = a.data[i] > 0;
+          const bb = b.data[i] > 0;
+          if (aa || bb) uni += 1;
+          if (aa && bb) inter += 1;
+        }
+        return uni > 0 ? inter / uni : 0;
+      }
+
+      let stableMask = null;
+      let stableMaskBbox = null;
+
+      function stabilizeDisplayMask(nextMask, bbox) {
+        if (!nextMask || !nextMask.data) return stableMask;
+        if (!stableMask || !stableMaskBbox || !bbox) {
+          stableMask = nextMask;
+          stableMaskBbox = bbox.slice();
+          return stableMask;
+        }
+        const iou = (function () {
+          const a = stableMaskBbox;
+          const b = bbox;
+          const ax1 = Math.min(a[0], a[2]);
+          const ay1 = Math.min(a[1], a[3]);
+          const ax2 = Math.max(a[0], a[2]);
+          const ay2 = Math.max(a[1], a[3]);
+          const bx1 = Math.min(b[0], b[2]);
+          const by1 = Math.min(b[1], b[3]);
+          const bx2 = Math.max(b[0], b[2]);
+          const by2 = Math.max(b[1], b[3]);
+          const ix1 = Math.max(ax1, bx1);
+          const iy1 = Math.max(ay1, by1);
+          const ix2 = Math.min(ax2, bx2);
+          const iy2 = Math.min(ay2, by2);
+          const iw = Math.max(0, ix2 - ix1);
+          const ih = Math.max(0, iy2 - iy1);
+          const inter = iw * ih;
+          if (inter <= 0) return 0;
+          const uni =
+            (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter;
+          return uni > 0 ? inter / uni : 0;
+        })();
+        const overlap = maskOverlapRatio(stableMask, nextMask);
+        // 镜头几乎不动：保持旧轮廓，避免微抖动
+        if (iou >= 0.72 && overlap >= 0.78) {
+          return stableMask;
+        }
+        if (iou >= 0.55 && overlap >= 0.88) {
+          return stableMask;
+        }
+        stableMask = nextMask;
+        stableMaskBbox = bbox.slice();
+        return stableMask;
+      }
+
+      function clearStableMask() {
+        stableMask = null;
+        stableMaskBbox = null;
+      }
+
+      /** 轮廓：半透明填充 + 连续平滑描边 */
       function drawSubjectContour(mask, bbox, srcW, srcH) {
         sizeSubjectOverlay();
         const ctx = subjectOverlay.getContext("2d");
@@ -2261,55 +2489,35 @@
         const ox = (ow - dw) / 2;
         const oy = (oh - dh) / 2;
 
-        if (mask && mask.data && mask.width && mask.height) {
-          const mw = mask.width;
-          const mh = mask.height;
-          const img = ctx.createImageData(mw, mh);
-          const px = img.data;
-          const src = mask.data;
-          for (let i = 0; i < mw * mh; i++) {
-            const on = src[i] > 0;
-            const o = i * 4;
-            if (!on) {
-              px[o + 3] = 0;
-              continue;
+        const useMask = mask && mask.data && mask.width && mask.height
+          ? stabilizeDisplayMask(mask, bbox)
+          : null;
+
+        if (useMask && useMask.data) {
+          const mw = useMask.width;
+          const mh = useMask.height;
+          const sx = dw / mw;
+          const sy = dh / mh;
+          const pts = traceMaskContour(useMask.data, mw, mh);
+          if (pts && pts.length >= 8) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.moveTo(ox + pts[0][0] * sx, oy + pts[0][1] * sy);
+            for (let i = 1; i < pts.length; i++) {
+              ctx.lineTo(ox + pts[i][0] * sx, oy + pts[i][1] * sy);
             }
-            const x = i % mw;
-            const y = (i / mw) | 0;
-            let edge = false;
-            if (
-              x === 0 ||
-              y === 0 ||
-              x === mw - 1 ||
-              y === mh - 1 ||
-              !(src[i - 1] > 0) ||
-              !(src[i + 1] > 0) ||
-              !(src[i - mw] > 0) ||
-              !(src[i + mw] > 0)
-            ) {
-              edge = true;
-            }
-            if (edge) {
-              px[o] = 74;
-              px[o + 1] = 222;
-              px[o + 2] = 128;
-              px[o + 3] = 220;
-            } else {
-              px[o] = 74;
-              px[o + 1] = 222;
-              px[o + 2] = 128;
-              px[o + 3] = 55;
-            }
+            ctx.closePath();
+            ctx.fillStyle = "rgba(74, 222, 128, 0.2)";
+            ctx.fill();
+            ctx.strokeStyle = "rgba(74, 222, 128, 0.9)";
+            ctx.lineWidth = Math.max(2.5, Math.round(ow / 160));
+            ctx.lineJoin = "round";
+            ctx.lineCap = "round";
+            ctx.miterLimit = 2;
+            ctx.stroke();
+            ctx.restore();
+            return;
           }
-          const tmp = document.createElement("canvas");
-          tmp.width = mw;
-          tmp.height = mh;
-          tmp.getContext("2d").putImageData(img, 0, 0);
-          ctx.save();
-          ctx.imageSmoothingEnabled = true;
-          ctx.drawImage(tmp, ox, oy, dw, dh);
-          ctx.restore();
-          return;
         }
 
         if (!bbox || bbox.length < 4) return;
@@ -2329,8 +2537,9 @@
         else ctx.rect(x, y, bw, bh);
         ctx.fillStyle = "rgba(74, 222, 128, 0.22)";
         ctx.fill();
-        ctx.strokeStyle = "#4ade80";
+        ctx.strokeStyle = "rgba(74, 222, 128, 0.9)";
         ctx.lineWidth = Math.max(2, Math.round(ow / 180));
+        ctx.lineJoin = "round";
         ctx.stroke();
         ctx.restore();
       }
@@ -2359,6 +2568,7 @@
         coachBtn.classList.remove("active");
         clearSubjectOverlay();
         hideCompositionGuide();
+        clearStableMask();
         setCoachHint("");
         if (coachEngine && coachEngine.clearTrackedSubject) {
           coachEngine.clearTrackedSubject();
@@ -2388,6 +2598,7 @@
           if (coachReanalyzeSoon) {
             coachReanalyzeSoon = false;
             lastMask = null;
+            clearStableMask();
             if (coachHardReset) {
               coachHardReset = false;
               if (coachEngine && coachEngine.clearTrackedSubject) {
@@ -2652,6 +2863,8 @@
         }
       });
       shutter.addEventListener("click", onShutter);
+      if (reviewSave) reviewSave.addEventListener("click", onReviewSave);
+      if (reviewCancel) reviewCancel.addEventListener("click", onReviewCancel);
       flipBtn.addEventListener("click", flipCamera);
 
       Array.prototype.forEach.call(
