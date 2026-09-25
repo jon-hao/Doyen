@@ -782,7 +782,7 @@
             await coachEngine.setSubjectMode(shootMode);
           } catch (_) {}
         }
-        if (coachActive) clearSubjectOverlay();
+        reanalyzeAssistSubject();
 
         const presets = currentPresets();
         const stillValid = presets.focals.some(function (f) {
@@ -1061,6 +1061,7 @@
         try {
           await openCamera("environment", lens.deviceId);
           currentLens = lens;
+          reanalyzeAssistSubject();
           return true;
         } catch (_) {
           return false;
@@ -1086,6 +1087,7 @@
               digitalScale = 1;
               updatePreviewTransform();
               updateZoomButtons();
+              reanalyzeAssistSubject();
               return;
             } catch (_) {
               // 继续尝试切 device / 数字变焦
@@ -1121,6 +1123,7 @@
 
           updatePreviewTransform();
           updateZoomButtons();
+          reanalyzeAssistSubject();
         } finally {
           zooming = false;
         }
@@ -1558,6 +1561,7 @@
       let coachTracking = false;
       let coachEngine = null;
       let coachDetectGen = 0;
+      let coachReanalyzeSoon = false;
 
       function coachAssetUrl(fileName) {
         const pathName = location.pathname || "/";
@@ -1833,16 +1837,28 @@
         const vw = video.videoWidth;
         const vh = video.videoHeight;
         if (!vw || !vh) throw new Error("画面还没就绪");
+
+        // 与取景一致：数字变焦时只分析可见裁切区，切焦后主体会重新算
+        let sx = 0;
+        let sy = 0;
+        let sw = vw;
+        let sh = vh;
+        if (digitalScale > 1.01) {
+          sw = vw / digitalScale;
+          sh = vh / digitalScale;
+          sx = (vw - sw) / 2;
+          sy = (vh - sh) / 2;
+        }
+
         const maxSide = 384;
-        const scale = Math.min(1, maxSide / Math.max(vw, vh));
-        const w = Math.max(1, Math.round(vw * scale));
-        const h = Math.max(1, Math.round(vh * scale));
+        const scale = Math.min(1, maxSide / Math.max(sw, sh));
+        const w = Math.max(1, Math.round(sw * scale));
+        const h = Math.max(1, Math.round(sh * scale));
         const c = document.createElement("canvas");
         c.width = w;
         c.height = h;
         const ctx = c.getContext("2d");
-        // 整帧缩略图检测；数字变焦由叠加层同步放大
-        ctx.drawImage(video, 0, 0, vw, vh, 0, 0, w, h);
+        ctx.drawImage(video, sx, sy, sw, sh, 0, 0, w, h);
         return { canvas: c, srcW: w, srcH: h };
       }
 
@@ -1900,13 +1916,9 @@
 
         ctx.clearRect(0, 0, ow, oh);
         ctx.save();
-        if (digitalScale > 1.01) {
-          ctx.translate(ow / 2, oh / 2);
-          ctx.scale(digitalScale, digitalScale);
-          ctx.translate(-ow / 2, -oh / 2);
-        }
+        // 检测画布已是可见裁切，叠加层不再二次 digitalScale
         ctx.strokeStyle = "#4ade80";
-        ctx.lineWidth = Math.max(2, Math.round(ow / 180)) / Math.max(digitalScale, 1);
+        ctx.lineWidth = Math.max(2, Math.round(ow / 180));
         ctx.shadowColor = "rgba(74, 222, 128, 0.55)";
         ctx.shadowBlur = 8;
         ctx.strokeRect(x, y, bw, bh);
@@ -1943,6 +1955,7 @@
         coachActive = false;
         coachDetectGen += 1;
         coachTracking = false;
+        coachReanalyzeSoon = false;
         coachBtn.classList.remove("active");
         clearSubjectOverlay();
         setCoachHint("");
@@ -1951,12 +1964,28 @@
         }
       }
 
+      /** 切焦距 / 镜头 / 模式后：丢掉旧跟踪，下一帧立刻重检 */
+      function reanalyzeAssistSubject() {
+        if (!coachActive) return;
+        coachReanalyzeSoon = true;
+        if (coachEngine && coachEngine.clearTrackedSubject) {
+          coachEngine.clearTrackedSubject();
+        }
+        clearSubjectOverlay();
+      }
+
       async function subjectTrackLoop(gen) {
         coachTracking = true;
         while (coachActive && gen === coachDetectGen) {
           if (!stream || document.hidden) {
             await new Promise(function (r) { setTimeout(r, 400); });
             continue;
+          }
+          if (coachReanalyzeSoon) {
+            coachReanalyzeSoon = false;
+            if (coachEngine && coachEngine.clearTrackedSubject) {
+              coachEngine.clearTrackedSubject();
+            }
           }
           const started = Date.now();
           try {
@@ -1974,7 +2003,8 @@
                 vision.objects || [],
                 snap.srcW,
                 snap.srcH,
-                shootMode === "portrait" ? "portrait" : "landscape"
+                shootMode === "portrait" ? "portrait" : "landscape",
+                snap.canvas
               );
             if (subject && subject.bbox) {
               drawSubjectBox(subject.bbox, snap.srcW, snap.srcH);
@@ -1985,9 +2015,8 @@
             if (!coachActive || gen !== coachDetectGen) break;
             clearSubjectOverlay();
           }
-          // 尽快跟帧：推理完立刻下一轮，仅留极短空隙给主线程
           const elapsed = Date.now() - started;
-          const wait = Math.max(0, 80 - elapsed);
+          const wait = coachReanalyzeSoon ? 0 : Math.max(0, 80 - elapsed);
           await new Promise(function (r) { setTimeout(r, wait); });
         }
         if (gen === coachDetectGen) {
