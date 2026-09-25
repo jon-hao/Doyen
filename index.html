@@ -93,6 +93,7 @@
       align-items: center;
       padding: 20px 16px calc(28px + var(--safe-bottom));
       pointer-events: none;
+      z-index: 20;
     }
 
 
@@ -496,9 +497,6 @@
       pointer-events: none;
       z-index: 2;
       touch-action: manipulation;
-    }
-    #subjectOverlay.interactive {
-      pointer-events: auto;
     }
 
     /* 类似 iPhone 相机：点击取景闪现对焦框 */
@@ -2089,7 +2087,6 @@
         coachReanalyzeSoon = false;
         coachHardReset = false;
         coachBtn.classList.remove("active");
-        if (subjectOverlay) subjectOverlay.classList.remove("interactive");
         clearSubjectOverlay();
         setCoachHint("");
         if (coachEngine && coachEngine.clearTrackedSubject) {
@@ -2188,7 +2185,6 @@
         stopSubjectTracking();
         coachActive = true;
         coachBtn.classList.add("active");
-        if (subjectOverlay) subjectOverlay.classList.add("interactive");
         setCoachHint("");
         sizeSubjectOverlay();
         const gen = ++coachDetectGen;
@@ -2239,15 +2235,16 @@
           return;
         }
         showTapFocus(ev.clientX, ev.clientY);
+        if (coachActive) {
+          pinSubjectFromTap(ev.clientX, ev.clientY);
+        }
       }
 
-      async function onSubjectOverlayTap(ev) {
+      async function pinSubjectFromTap(clientX, clientY) {
         if (!coachActive || !coachEngine || !stream) return;
-        showTapFocus(ev.clientX, ev.clientY);
-        ev.preventDefault();
         try {
           const snap = captureDetectCanvas();
-          const pt = mapOverlayToSrc(ev.clientX, ev.clientY, snap.srcW, snap.srcH);
+          const pt = mapOverlayToSrc(clientX, clientY, snap.srcW, snap.srcH);
           const modeNow =
             shootMode === "portrait" ? "portrait" : "landscape";
           let objects = lastTapObjects;
@@ -2343,9 +2340,6 @@
         coachBtn.classList.remove("pressed");
       });
       coachBtn.addEventListener("click", onCoachClick);
-      if (subjectOverlay) {
-        subjectOverlay.addEventListener("click", onSubjectOverlayTap);
-      }
       if (stageEl) {
         stageEl.addEventListener("pointerdown", onStagePointerDown, {
           passive: true,
