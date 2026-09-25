@@ -1590,7 +1590,7 @@
           base = pathName + "/" + fileName;
         }
         // 同域优先；jsDelivr 作备用（Pages 延迟时）
-        return base + "?v=20260925-contour1";
+        return base + "?v=20260925-contour2";
       }
 
       /** 已成功加载过：静默热启动，不闪「下载资源」 */
@@ -1743,7 +1743,7 @@
           return coachEngine;
         } catch (_) {
           coachEngine = await import(
-            "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/coach-engine.js?v=20260925-contour1"
+            "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/coach-engine.js?v=20260925-contour2"
           );
           return coachEngine;
         }
@@ -1971,10 +1971,10 @@
               y === 0 ||
               x === mw - 1 ||
               y === mh - 1 ||
-              !src[i - 1] ||
-              !src[i + 1] ||
-              !src[i - mw] ||
-              !src[i + mw]
+              !(src[i - 1] > 0) ||
+              !(src[i + 1] > 0) ||
+              !(src[i - mw] > 0) ||
+              !(src[i + mw] > 0)
             ) {
               edge = true;
             }

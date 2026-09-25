@@ -1045,6 +1045,7 @@ export function clearPinnedSubject() {
 
 /**
  * MagicTouch：在归一化点击/主体中心处分割轮廓掩码
+ * 输出统一为 1=主体、0=背景（按点击点极性自动校正，避免内外反了）
  * @returns {null|{width:number,height:number,data:Uint8Array}}
  */
 export function segmentSubjectMask(canvas, nx, ny) {
@@ -1062,24 +1063,33 @@ export function segmentSubjectMask(canvas, nx, ny) {
         const mw = mask.width | 0;
         const mh = mask.height | 0;
         if (!mw || !mh) return;
-        let src;
+        let raw;
         try {
-          src = mask.getAsUint8Array();
+          raw = mask.getAsUint8Array();
         } catch (_) {
           try {
             const f32 = mask.getAsFloat32Array();
-            src = new Uint8Array(f32.length);
+            raw = new Uint8Array(f32.length);
             for (let i = 0; i < f32.length; i++) {
-              src[i] = f32[i] > 0.5 ? 1 : 0;
+              raw[i] = f32[i] > 0.5 ? 1 : 0;
             }
           } catch (_) {
             return;
           }
         }
+        const ix = Math.max(0, Math.min(mw - 1, Math.round(x * (mw - 1))));
+        const iy = Math.max(0, Math.min(mh - 1, Math.round(y * (mh - 1))));
+        const atClick = raw[iy * mw + ix] > 0;
+        // 点击点应落在主体上：若模型把主体标成 0，则整幅取反
+        const data = new Uint8Array(mw * mh);
+        for (let i = 0; i < data.length; i++) {
+          const fg = raw[i] > 0;
+          data[i] = atClick ? (fg ? 1 : 0) : fg ? 0 : 1;
+        }
         out = {
           width: mw,
           height: mh,
-          data: new Uint8Array(src),
+          data: data,
         };
       }
     );
