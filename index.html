@@ -1562,7 +1562,7 @@
           base = pathName + "/" + fileName;
         }
         // 同域优先；jsDelivr 作备用（Pages 延迟时）
-        return base + "?v=20260924-req1";
+        return base + "?v=20260925-subject1";
       }
 
       function setCoachHint(text) {
@@ -1710,7 +1710,7 @@
           return coachEngine;
         } catch (_) {
           coachEngine = await import(
-            "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/coach-engine.js?v=20260924-req1"
+            "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/coach-engine.js?v=20260925-subject1"
           );
           return coachEngine;
         }
@@ -1928,6 +1928,9 @@
         coachBtn.classList.remove("active");
         clearSubjectOverlay();
         setCoachHint("");
+        if (coachEngine && coachEngine.clearTrackedSubject) {
+          coachEngine.clearTrackedSubject();
+        }
       }
 
       async function subjectTrackLoop(gen) {
@@ -1945,7 +1948,13 @@
             }
             const vision = await coachEngine.detectSubjects(snap.canvas);
             if (!coachActive || gen !== coachDetectGen) break;
-            const subject = coachEngine.pickPrimarySubject(vision.objects || []);
+            const subject =
+              vision.primary ||
+              coachEngine.pickPrimarySubject(
+                vision.objects || [],
+                snap.srcW,
+                snap.srcH
+              );
             if (subject && subject.bbox) {
               drawSubjectBox(subject.bbox, snap.srcW, snap.srcH);
             } else {
