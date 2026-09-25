@@ -773,6 +773,7 @@
       async function setShootMode(mode) {
         if (!MODE_PRESETS[mode]) return;
         if (facingMode !== "environment") return;
+        const prevMode = shootMode;
         shootMode = mode;
         updateModeButtons();
         renderFocalButtons();
@@ -782,6 +783,7 @@
             await coachEngine.setSubjectMode(shootMode);
           } catch (_) {}
         }
+        // 风景 ↔ 人像：策略不同，必须丢掉旧框并重检
         reanalyzeAssistSubject();
 
         const presets = currentPresets();
@@ -790,6 +792,11 @@
         });
         const nextZoom = stillValid ? zoomFactor : presets.defaultZoom;
         await applyZoomFactor(nextZoom);
+
+        // 变焦流程结束后再清一次，避免旧检测结果写回
+        if (prevMode !== shootMode || coachActive) {
+          reanalyzeAssistSubject();
+        }
       }
 
       function getStageSize() {
@@ -1562,6 +1569,8 @@
       let coachEngine = null;
       let coachDetectGen = 0;
       let coachReanalyzeSoon = false;
+      /** 切模式/焦距/镜头时递增，作废进行中的旧检测结果 */
+      let coachViewGen = 0;
 
       function coachAssetUrl(fileName) {
         const pathName = location.pathname || "/";
@@ -1954,6 +1963,7 @@
       function stopSubjectTracking() {
         coachActive = false;
         coachDetectGen += 1;
+        coachViewGen += 1;
         coachTracking = false;
         coachReanalyzeSoon = false;
         coachBtn.classList.remove("active");
@@ -1964,10 +1974,11 @@
         }
       }
 
-      /** 切焦距 / 镜头 / 模式后：丢掉旧跟踪，下一帧立刻重检 */
+      /** 切焦距 / 镜头 / 模式后：丢掉旧跟踪，作废飞行中检测，下一帧立刻重检 */
       function reanalyzeAssistSubject() {
         if (!coachActive) return;
         coachReanalyzeSoon = true;
+        coachViewGen += 1;
         if (coachEngine && coachEngine.clearTrackedSubject) {
           coachEngine.clearTrackedSubject();
         }
@@ -1987,6 +1998,9 @@
               coachEngine.clearTrackedSubject();
             }
           }
+          const viewGen = coachViewGen;
+          const modeNow =
+            shootMode === "portrait" ? "portrait" : "landscape";
           const started = Date.now();
           try {
             const snap = captureDetectCanvas();
@@ -1994,18 +2008,27 @@
               throw new Error("引擎未就绪");
             }
             const vision = await coachEngine.detectSubjects(snap.canvas, null, {
-              mode: shootMode === "portrait" ? "portrait" : "landscape",
+              mode: modeNow,
             });
             if (!coachActive || gen !== coachDetectGen) break;
+            // 切模式/焦距期间的旧结果一律丢弃
+            if (viewGen !== coachViewGen) continue;
+            if (vision.mode && vision.mode !== modeNow) continue;
+            if (
+              (shootMode === "portrait" ? "portrait" : "landscape") !== modeNow
+            ) {
+              continue;
+            }
             const subject =
               vision.primary ||
               coachEngine.pickPrimarySubject(
                 vision.objects || [],
                 snap.srcW,
                 snap.srcH,
-                shootMode === "portrait" ? "portrait" : "landscape",
+                modeNow,
                 snap.canvas
               );
+            if (viewGen !== coachViewGen) continue;
             if (subject && subject.bbox) {
               drawSubjectBox(subject.bbox, snap.srcW, snap.srcH);
             } else {
@@ -2013,7 +2036,7 @@
             }
           } catch (_) {
             if (!coachActive || gen !== coachDetectGen) break;
-            clearSubjectOverlay();
+            if (viewGen === coachViewGen) clearSubjectOverlay();
           }
           const elapsed = Date.now() - started;
           const wait = coachReanalyzeSoon ? 0 : Math.max(0, 80 - elapsed);
