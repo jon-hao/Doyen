@@ -1974,9 +1974,9 @@
             if (!coachActive || gen !== coachDetectGen) break;
             clearSubjectOverlay();
           }
-          // 检测防抖：每轮至少间隔 700ms，避免连打推理
+          // 尽快跟帧：推理完立刻下一轮，仅留极短空隙给主线程
           const elapsed = Date.now() - started;
-          const wait = Math.max(0, 700 - elapsed);
+          const wait = Math.max(0, 80 - elapsed);
           await new Promise(function (r) { setTimeout(r, wait); });
         }
         if (gen === coachDetectGen) {

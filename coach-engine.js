@@ -21,6 +21,8 @@ let loadPromise = null;
 let videoTs = 0;
 /** @type {null | {label:string, score:number, bbox:number[]}} */
 let trackedSubject = null;
+/** 连续未检测到主体的帧数；用于短暂丢检时不立刻清框 */
+let trackMissStreak = 0;
 /** @type {"landscape" | "portrait"} */
 let subjectMode = "landscape";
 
@@ -33,6 +35,7 @@ export async function setSubjectMode(mode) {
   if (next === subjectMode && detector) return subjectMode;
   subjectMode = next;
   trackedSubject = null;
+  trackMissStreak = 0;
   if (!detector || typeof detector.setOptions !== "function") return subjectMode;
   try {
     if (subjectMode === "portrait") {
@@ -393,7 +396,30 @@ function lerpBox(a, b, t) {
 }
 
 /**
- * 摄影向「单个独立个体」打分。
+ * 完整度：框是否整段落在画面内（贴边 = 可能被裁切，完整度下降）。
+ * 1 = 四边都留白；贴边越多越低。
+ */
+function boxCompleteness(b, imgW, imgH) {
+  if (!b || b.length < 4) return 0;
+  const w = Math.max(1, imgW || 1);
+  const h = Math.max(1, imgH || 1);
+  const x1 = Math.min(b[0], b[2]);
+  const y1 = Math.min(b[1], b[3]);
+  const x2 = Math.max(b[0], b[2]);
+  const y2 = Math.max(b[1], b[3]);
+  const margin = Math.max(2, Math.min(w, h) * 0.02);
+  let score = 1;
+  if (x1 <= margin) score -= 0.28;
+  if (y1 <= margin) score -= 0.28;
+  if (x2 >= w - margin) score -= 0.28;
+  if (y2 >= h - margin) score -= 0.28;
+  // 硬裁切（坐标越界）再扣
+  if (x1 < 0 || y1 < 0 || x2 > w || y2 > h) score -= 0.15;
+  return Math.max(0, Math.min(1, score));
+}
+
+/**
+ * 主体权重：① 完整度最高 ② 最接近画面中心。
  * mode=portrait：只服务人像；mode=landscape：全类别主体，不强制偏人。
  */
 function subjectSalience(obj, imgW, imgH, mode) {
@@ -406,44 +432,26 @@ function subjectSalience(obj, imgW, imgH, mode) {
   const bh = Math.abs(b[3] - b[1]);
   const area = bw * bh;
   const areaRatio = area / frameArea;
-  if (areaRatio < 0.025) return -1;
-  if (areaRatio > 0.62) return -1;
+  if (areaRatio < 0.02) return -1;
+  if (areaRatio > 0.7) return -1;
 
-  const sweet =
-    areaRatio < 0.08
-      ? areaRatio / 0.08
-      : areaRatio <= 0.4
-        ? 1
-        : Math.max(0, 1 - (areaRatio - 0.4) / 0.22);
+  const person = isPersonLabel(obj.label);
+  if (mode === "portrait" && !person) return -1;
 
+  const completeness = boxCompleteness(b, w, h);
   const cx = (Math.min(b[0], b[2]) + Math.max(b[0], b[2])) / 2;
   const cy = (Math.min(b[1], b[3]) + Math.max(b[1], b[3])) / 2;
   const dx = (cx - w * 0.5) / w;
   const dy = (cy - h * 0.5) / h;
-  const center = 1 - Math.min(1, Math.sqrt(dx * dx + dy * dy) * 1.25);
+  const center = 1 - Math.min(1, Math.sqrt(dx * dx + dy * dy) * 1.35);
   const conf = Math.max(0, Math.min(1, Number(obj.score) || 0));
-  const person = isPersonLabel(obj.label);
-  const aspect = bw / Math.max(bh, 1);
 
-  let shape = 1;
-  if (person) {
-    if (aspect >= 0.22 && aspect <= 0.85) shape = 1.2;
-    else if (aspect > 1.15) shape = 0.45;
-    else shape = 0.75;
-  } else if (aspect > 1.8 || aspect < 0.15) {
-    shape = 0.55;
-  }
-
-  // 人像：强制偏人；风景：人不加权，避免风景里路人抢主体
+  // 完整度为主（×10 档），中心次之；置信度仅微调
   let classBoost = 1;
-  if (mode === "portrait") {
-    if (!person) return -1;
-    classBoost = 1.7;
-  } else if (person) {
-    classBoost = 0.85;
-  }
+  if (mode === "portrait") classBoost = 1.05;
+  else if (person) classBoost = 0.9;
 
-  return sweet * (0.3 + 0.7 * conf) * (0.4 + 0.6 * center) * shape * classBoost;
+  return (completeness * 10 + center * 2.5 + conf * 0.4) * classBoost;
 }
 
 function intersectionArea(a, b) {
@@ -630,9 +638,17 @@ export function stabilizeSubject(next, imgW, imgH, mode) {
     trackedSubject = null;
   }
 
+  // 本帧无检测：短暂保留旧框，连续丢检则清空（避免镜头已移走还钉死旧位置）
   if (!next || !next.bbox) {
+    trackMissStreak += 1;
+    if (trackMissStreak >= 3) {
+      trackedSubject = null;
+      return null;
+    }
     return trackedSubject;
   }
+  trackMissStreak = 0;
+
   if (!trackedSubject || !trackedSubject.bbox) {
     trackedSubject = {
       label: next.label,
@@ -642,6 +658,7 @@ export function stabilizeSubject(next, imgW, imgH, mode) {
     return trackedSubject;
   }
 
+  // 拒绝突然膨胀的「组合大框」，但仍跟随后续合法检测
   const prevArea = boxArea(trackedSubject.bbox);
   const nextArea = boxArea(next.bbox);
   if (
@@ -652,37 +669,28 @@ export function stabilizeSubject(next, imgW, imgH, mode) {
   }
 
   const iou = boxIoU(trackedSubject.bbox, next.bbox);
-  const nextSal = subjectSalience(next, imgW, imgH, m);
-  const prevSal = subjectSalience(trackedSubject, imgW, imgH, m);
 
-  if (iou >= 0.28) {
+  // 同主体：高跟随系数，镜头一动框就跟上
+  if (iou >= 0.12) {
+    const t = iou >= 0.35 ? 0.72 : 0.92;
     trackedSubject = {
       label: next.label || trackedSubject.label,
       score: next.score,
-      bbox: lerpBox(trackedSubject.bbox, next.bbox, 0.35),
+      bbox: lerpBox(trackedSubject.bbox, next.bbox, t),
     };
     return trackedSubject;
   }
 
-  if (nextSal > prevSal * 1.35 && nextSal > 0.1) {
-    trackedSubject = {
-      label: next.label,
-      score: next.score,
-      bbox: next.bbox.slice(),
-    };
-    return trackedSubject;
-  }
-
-  if (iou > 0.08) {
-    trackedSubject = {
-      label: trackedSubject.label,
-      score: trackedSubject.score,
-      bbox: lerpBox(trackedSubject.bbox, next.bbox, 0.1),
-    };
-  }
+  // IoU 很低 = 镜头大幅移动或换主体：直接切到本帧最优（完整度+中心）
+  trackedSubject = {
+    label: next.label,
+    score: next.score,
+    bbox: next.bbox.slice(),
+  };
   return trackedSubject;
 }
 
 export function clearTrackedSubject() {
   trackedSubject = null;
+  trackMissStreak = 0;
 }
