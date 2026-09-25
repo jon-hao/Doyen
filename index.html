@@ -501,6 +501,46 @@
       pointer-events: auto;
     }
 
+    /* 类似 iPhone 相机：点击取景闪现对焦框 */
+    #tapFocus {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 78px;
+      height: 78px;
+      margin-left: -39px;
+      margin-top: -39px;
+      border: 1.5px solid #f4d35e;
+      border-radius: 3px;
+      box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.25);
+      pointer-events: none;
+      z-index: 4;
+      opacity: 0;
+      transform: scale(1.4);
+      will-change: transform, opacity;
+    }
+    #tapFocus.show {
+      animation: tapFocusFlash 0.9s ease-out forwards;
+    }
+    @keyframes tapFocusFlash {
+      0% {
+        opacity: 1;
+        transform: scale(1.38);
+      }
+      18% {
+        opacity: 1;
+        transform: scale(1);
+      }
+      72% {
+        opacity: 1;
+        transform: scale(1);
+      }
+      100% {
+        opacity: 0;
+        transform: scale(1);
+      }
+    }
+
     canvas#shot { display: none; }
 
   </style>
@@ -517,6 +557,7 @@
         disablepictureinpicture
       ></video>
       <canvas id="subjectOverlay"></canvas>
+      <div id="tapFocus" aria-hidden="true"></div>
     </div>
     <canvas id="shot"></canvas>
     <div id="flash"></div>
@@ -568,6 +609,7 @@
       const coachBtn = document.getElementById("coachBtn");
       const coachHint = document.getElementById("coachHint");
       const subjectOverlay = document.getElementById("subjectOverlay");
+      const tapFocus = document.getElementById("tapFocus");
       const toast = document.getElementById("toast");
       const gate = document.getElementById("gate");
       const secureHint = document.getElementById("secureHint");
@@ -582,6 +624,7 @@
       const zoomBar = document.getElementById("zoomBar");
       const modeBar = document.getElementById("modeBar");
       const focalRow = document.getElementById("focalRow");
+      const stageEl = document.getElementById("stage");
 
       // 以主摄 ≈24mm 为 1x，焦段换算成相对倍率
       const MODE_PRESETS = {
@@ -2152,8 +2195,55 @@
         subjectTrackLoop(gen);
       }
 
+      function isUiControlTarget(el) {
+        if (!el || !el.closest) return false;
+        return !!(
+          el.closest("button") ||
+          el.closest("#controls") ||
+          el.closest("#coachSlot") ||
+          el.closest("#gate") ||
+          el.closest("#probe") ||
+          el.closest("#toast")
+        );
+      }
+
+      let tapFocusTimer = 0;
+      function showTapFocus(clientX, clientY) {
+        if (!tapFocus || !stageEl || !stream) return;
+        if (!controls || !controls.classList.contains("show")) return;
+        if (probe && probe.classList.contains("show")) return;
+
+        const rect = stageEl.getBoundingClientRect();
+        const x = clientX - rect.left;
+        const y = clientY - rect.top;
+        if (x < 0 || y < 0 || x > rect.width || y > rect.height) return;
+
+        tapFocus.style.left = x + "px";
+        tapFocus.style.top = y + "px";
+        tapFocus.classList.remove("show");
+        void tapFocus.offsetWidth;
+        tapFocus.classList.add("show");
+        if (tapFocusTimer) window.clearTimeout(tapFocusTimer);
+        tapFocusTimer = window.setTimeout(function () {
+          tapFocus.classList.remove("show");
+          tapFocusTimer = 0;
+        }, 950);
+      }
+
+      function onStagePointerDown(ev) {
+        if (!stream) return;
+        if (!controls || !controls.classList.contains("show")) return;
+        if (probe && probe.classList.contains("show")) return;
+        if (isUiControlTarget(ev.target)) return;
+        if (ev.pointerType === "mouse" && typeof ev.button === "number" && ev.button !== 0) {
+          return;
+        }
+        showTapFocus(ev.clientX, ev.clientY);
+      }
+
       async function onSubjectOverlayTap(ev) {
         if (!coachActive || !coachEngine || !stream) return;
+        showTapFocus(ev.clientX, ev.clientY);
         ev.preventDefault();
         try {
           const snap = captureDetectCanvas();
@@ -2255,6 +2345,11 @@
       coachBtn.addEventListener("click", onCoachClick);
       if (subjectOverlay) {
         subjectOverlay.addEventListener("click", onSubjectOverlayTap);
+      }
+      if (stageEl) {
+        stageEl.addEventListener("pointerdown", onStagePointerDown, {
+          passive: true,
+        });
       }
 
       function onHoldOrientationChange() {
