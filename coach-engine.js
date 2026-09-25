@@ -21,6 +21,35 @@ let loadPromise = null;
 let videoTs = 0;
 /** @type {null | {label:string, score:number, bbox:number[]}} */
 let trackedSubject = null;
+/** @type {"landscape" | "portrait"} */
+let subjectMode = "landscape";
+
+/**
+ * 风景 / 人像 切换检测策略。
+ * 人像：检测器只输出 person；风景：全类别里挑独立主体。
+ */
+export async function setSubjectMode(mode) {
+  const next = mode === "portrait" ? "portrait" : "landscape";
+  if (next === subjectMode && detector) return subjectMode;
+  subjectMode = next;
+  trackedSubject = null;
+  if (!detector || typeof detector.setOptions !== "function") return subjectMode;
+  try {
+    if (subjectMode === "portrait") {
+      await detector.setOptions({ categoryAllowlist: ["person"] });
+    } else {
+      // 清空 allowlist，恢复检测所有类别
+      await detector.setOptions({ categoryAllowlist: [] });
+    }
+  } catch (_) {
+    // 部分 runtime 不支持动态改 allowlist，仍靠 pickPrimarySubject 分流
+  }
+  return subjectMode;
+}
+
+export function getSubjectMode() {
+  return subjectMode;
+}
 
 function notify(onProgress, payload) {
   if (typeof onProgress === "function") onProgress(payload);
@@ -195,6 +224,7 @@ export function resetCoachRuntime() {
   deviceUsed = "wasm";
   videoTs = 0;
   trackedSubject = null;
+  subjectMode = "landscape";
 }
 export function getCoachDevice() {
   return deviceUsed;
@@ -240,6 +270,7 @@ async function createDetector(onProgress) {
       scoreThreshold: 0.32,
       maxResults: 12,
       runningMode: "VIDEO",
+      // 默认风景：不限制类别；人像模式切换时再 setOptions 只留 person
     });
     deviceUsed = "wasm";
   } catch (_) {
@@ -362,12 +393,10 @@ function lerpBox(a, b, t) {
 }
 
 /**
- * 摄影向「单个独立个体」打分：
- * - 偏好中等大小框（拒绝几乎铺满/并集大框）
- * - 人像加权 + 合理人体宽高比
- * - 置信度与居中
+ * 摄影向「单个独立个体」打分。
+ * mode=portrait：只服务人像；mode=landscape：全类别主体，不强制偏人。
  */
-function subjectSalience(obj, imgW, imgH) {
+function subjectSalience(obj, imgW, imgH, mode) {
   const b = obj && obj.bbox;
   if (!b || b.length < 4) return -1;
   const w = Math.max(1, imgW || 1);
@@ -377,11 +406,9 @@ function subjectSalience(obj, imgW, imgH) {
   const bh = Math.abs(b[3] - b[1]);
   const area = bw * bh;
   const areaRatio = area / frameArea;
-  // 过小噪点 / 过大「多物体并集」都不要
   if (areaRatio < 0.025) return -1;
   if (areaRatio > 0.62) return -1;
 
-  // 面积甜区约 8%–40%：更像画面中的「某一个体」
   const sweet =
     areaRatio < 0.08
       ? areaRatio / 0.08
@@ -395,10 +422,9 @@ function subjectSalience(obj, imgW, imgH) {
   const dy = (cy - h * 0.5) / h;
   const center = 1 - Math.min(1, Math.sqrt(dx * dx + dy * dy) * 1.25);
   const conf = Math.max(0, Math.min(1, Number(obj.score) || 0));
-
   const person = isPersonLabel(obj.label);
   const aspect = bw / Math.max(bh, 1);
-  // 单人常见竖向/半身比例；过扁更像多人横排或家具组合
+
   let shape = 1;
   if (person) {
     if (aspect >= 0.22 && aspect <= 0.85) shape = 1.2;
@@ -408,8 +434,16 @@ function subjectSalience(obj, imgW, imgH) {
     shape = 0.55;
   }
 
-  const personBoost = person ? 1.7 : 1;
-  return sweet * (0.3 + 0.7 * conf) * (0.4 + 0.6 * center) * shape * personBoost;
+  // 人像：强制偏人；风景：人不加权，避免风景里路人抢主体
+  let classBoost = 1;
+  if (mode === "portrait") {
+    if (!person) return -1;
+    classBoost = 1.7;
+  } else if (person) {
+    classBoost = 0.85;
+  }
+
+  return sweet * (0.3 + 0.7 * conf) * (0.4 + 0.6 * center) * shape * classBoost;
 }
 
 function intersectionArea(a, b) {
@@ -501,12 +535,20 @@ function detectionsToObjects(result) {
 }
 
 /**
- * 检测画面主体。VIDEO 模式 + 原子个体筛选 + 时序平滑。
+ * @param {Blob|HTMLCanvasElement} source
+ * @param {function=} onProgress
+ * @param {{mode?: "landscape"|"portrait"}=} options
  */
-export async function detectSubjects(source, onProgress) {
+export async function detectSubjects(source, onProgress, options) {
   if (!detector || !warmed) {
     await loadCoach(onProgress);
   }
+  const mode =
+    options && options.mode === "portrait" ? "portrait" : "landscape";
+  if (mode !== subjectMode) {
+    await setSubjectMode(mode);
+  }
+
   const canvas = canvasFromSource(source);
   videoTs += 33;
   let result;
@@ -516,21 +558,29 @@ export async function detectSubjects(source, onProgress) {
     result = detector.detect(canvas);
   }
 
-  const objects = detectionsToObjects(result);
-  const primaryRaw = pickPrimarySubject(objects, canvas.width, canvas.height);
-  const primary = stabilizeSubject(primaryRaw, canvas.width, canvas.height);
+  let objects = detectionsToObjects(result);
+  // 人像兜底：即便 allowlist 未生效，也只保留人
+  if (mode === "portrait") {
+    objects = objects.filter(function (o) {
+      return isPersonLabel(o.label);
+    });
+  }
+
+  const primaryRaw = pickPrimarySubject(objects, canvas.width, canvas.height, mode);
+  const primary = stabilizeSubject(primaryRaw, canvas.width, canvas.height, mode);
 
   return {
     objects: objects,
     primary: primary,
+    mode: mode,
     imageSize: [canvas.width, canvas.height],
     device: deviceUsed,
   };
 }
 
 /** 兼容旧接口 */
-export async function analyzeFrame(source, onProgress) {
-  const vision = await detectSubjects(source, onProgress);
+export async function analyzeFrame(source, onProgress, options) {
+  const vision = await detectSubjects(source, onProgress, options);
   return {
     caption: "",
     objects: vision.objects,
@@ -540,30 +590,29 @@ export async function analyzeFrame(source, onProgress) {
 }
 
 /**
- * 只选「某一个独立个体」：
- * 1) 有人则只在人里选
- * 2) 去掉包住多个检测的并集大框
- * 3) 用单体显著性打分
+ * 风景：全类别里挑一个独立主体（不强制人）
+ * 人像：只框人；没人则返回 null
  */
-export function pickPrimarySubject(objects, imgW, imgH) {
+export function pickPrimarySubject(objects, imgW, imgH, mode) {
   const list = objects || [];
   if (!list.length) return null;
+  const m = mode === "portrait" ? "portrait" : "landscape";
 
-  const people = [];
-  const others = [];
-  for (let i = 0; i < list.length; i++) {
-    if (isPersonLabel(list[i].label)) people.push(list[i]);
-    else others.push(list[i]);
+  let basePool;
+  if (m === "portrait") {
+    basePool = list.filter(function (o) {
+      return isPersonLabel(o.label);
+    });
+    if (!basePool.length) return null;
+  } else {
+    basePool = list;
   }
 
-  // 人像场景：强制在 person 里选一个，避免框到「人+椅子+包」的大并集
-  const basePool = people.length ? people : others;
   const pool = keepAtomicIndividuals(basePool);
-
   let best = null;
   let bestScore = -1;
   for (let i = 0; i < pool.length; i++) {
-    const s = subjectSalience(pool[i], imgW, imgH);
+    const s = subjectSalience(pool[i], imgW, imgH, m);
     if (s > bestScore) {
       bestScore = s;
       best = pool[i];
@@ -572,10 +621,15 @@ export function pickPrimarySubject(objects, imgW, imgH) {
   return best;
 }
 
-/**
- * IoU 跟踪平滑；拒绝跳到明显更大的「组合框」
- */
-export function stabilizeSubject(next, imgW, imgH) {
+export function stabilizeSubject(next, imgW, imgH, mode) {
+  const m = mode === "portrait" ? "portrait" : "landscape";
+  if (m === "portrait" && next && !isPersonLabel(next.label)) {
+    next = null;
+  }
+  if (m === "portrait" && trackedSubject && !isPersonLabel(trackedSubject.label)) {
+    trackedSubject = null;
+  }
+
   if (!next || !next.bbox) {
     return trackedSubject;
   }
@@ -590,7 +644,6 @@ export function stabilizeSubject(next, imgW, imgH) {
 
   const prevArea = boxArea(trackedSubject.bbox);
   const nextArea = boxArea(next.bbox);
-  // 新框突然大很多且包住旧框 → 多半是并集误检，忽略
   if (
     nextArea > prevArea * 1.85 &&
     mostlyContains(next.bbox, trackedSubject.bbox)
@@ -599,8 +652,8 @@ export function stabilizeSubject(next, imgW, imgH) {
   }
 
   const iou = boxIoU(trackedSubject.bbox, next.bbox);
-  const nextSal = subjectSalience(next, imgW, imgH);
-  const prevSal = subjectSalience(trackedSubject, imgW, imgH);
+  const nextSal = subjectSalience(next, imgW, imgH, m);
+  const prevSal = subjectSalience(trackedSubject, imgW, imgH, m);
 
   if (iou >= 0.28) {
     trackedSubject = {

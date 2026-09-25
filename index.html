@@ -777,6 +777,13 @@
         updateModeButtons();
         renderFocalButtons();
 
+        if (coachEngine && coachEngine.setSubjectMode) {
+          try {
+            await coachEngine.setSubjectMode(shootMode);
+          } catch (_) {}
+        }
+        if (coachActive) clearSubjectOverlay();
+
         const presets = currentPresets();
         const stillValid = presets.focals.some(function (f) {
           return Math.abs(f.zoom - zoomFactor) < 0.05;
@@ -1562,7 +1569,7 @@
           base = pathName + "/" + fileName;
         }
         // 同域优先；jsDelivr 作备用（Pages 延迟时）
-        return base + "?v=20260925-atomic1";
+        return base + "?v=20260925-mode1";
       }
 
       function setCoachHint(text) {
@@ -1710,7 +1717,7 @@
           return coachEngine;
         } catch (_) {
           coachEngine = await import(
-            "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/coach-engine.js?v=20260925-atomic1"
+            "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/coach-engine.js?v=20260925-mode1"
           );
           return coachEngine;
         }
@@ -1946,14 +1953,17 @@
             if (!coachEngine || !coachEngine.detectSubjects) {
               throw new Error("引擎未就绪");
             }
-            const vision = await coachEngine.detectSubjects(snap.canvas);
+            const vision = await coachEngine.detectSubjects(snap.canvas, null, {
+              mode: shootMode === "portrait" ? "portrait" : "landscape",
+            });
             if (!coachActive || gen !== coachDetectGen) break;
             const subject =
               vision.primary ||
               coachEngine.pickPrimarySubject(
                 vision.objects || [],
                 snap.srcW,
-                snap.srcH
+                snap.srcH,
+                shootMode === "portrait" ? "portrait" : "landscape"
               );
             if (subject && subject.bbox) {
               drawSubjectBox(subject.bbox, snap.srcW, snap.srcH);
