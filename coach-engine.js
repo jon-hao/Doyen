@@ -237,8 +237,8 @@ async function createDetector(onProgress) {
         modelAssetBuffer: modelBuffer,
         delegate: "CPU",
       },
-      scoreThreshold: 0.25,
-      maxResults: 10,
+      scoreThreshold: 0.32,
+      maxResults: 12,
       runningMode: "VIDEO",
     });
     deviceUsed = "wasm";
@@ -248,8 +248,8 @@ async function createDetector(onProgress) {
         modelAssetBuffer: modelBuffer,
         delegate: "GPU",
       },
-      scoreThreshold: 0.25,
-      maxResults: 10,
+      scoreThreshold: 0.32,
+      maxResults: 12,
       runningMode: "VIDEO",
     });
     deviceUsed = "webgl";
@@ -362,8 +362,10 @@ function lerpBox(a, b, t) {
 }
 
 /**
- * 摄影向主体分：面积占比 × 置信度 × 靠近画面中心
- * 人像加权；过滤过小/铺满全屏的噪声框
+ * 摄影向「单个独立个体」打分：
+ * - 偏好中等大小框（拒绝几乎铺满/并集大框）
+ * - 人像加权 + 合理人体宽高比
+ * - 置信度与居中
  */
 function subjectSalience(obj, imgW, imgH) {
   const b = obj && obj.bbox;
@@ -371,24 +373,108 @@ function subjectSalience(obj, imgW, imgH) {
   const w = Math.max(1, imgW || 1);
   const h = Math.max(1, imgH || 1);
   const frameArea = w * h;
-  const area = boxArea(b);
+  const bw = Math.abs(b[2] - b[0]);
+  const bh = Math.abs(b[3] - b[1]);
+  const area = bw * bh;
   const areaRatio = area / frameArea;
-  if (areaRatio < 0.02) return -1;
-  if (areaRatio > 0.92) return -1;
+  // 过小噪点 / 过大「多物体并集」都不要
+  if (areaRatio < 0.025) return -1;
+  if (areaRatio > 0.62) return -1;
+
+  // 面积甜区约 8%–40%：更像画面中的「某一个体」
+  const sweet =
+    areaRatio < 0.08
+      ? areaRatio / 0.08
+      : areaRatio <= 0.4
+        ? 1
+        : Math.max(0, 1 - (areaRatio - 0.4) / 0.22);
 
   const cx = (Math.min(b[0], b[2]) + Math.max(b[0], b[2])) / 2;
   const cy = (Math.min(b[1], b[3]) + Math.max(b[1], b[3])) / 2;
   const dx = (cx - w * 0.5) / w;
   const dy = (cy - h * 0.5) / h;
-  const center = 1 - Math.min(1, Math.sqrt(dx * dx + dy * dy) * 1.35);
+  const center = 1 - Math.min(1, Math.sqrt(dx * dx + dy * dy) * 1.25);
   const conf = Math.max(0, Math.min(1, Number(obj.score) || 0));
-  const personBoost = isPersonLabel(obj.label) ? 1.55 : 1;
-  return (
-    Math.sqrt(areaRatio) *
-    (0.35 + 0.65 * conf) *
-    (0.45 + 0.55 * center) *
-    personBoost
-  );
+
+  const person = isPersonLabel(obj.label);
+  const aspect = bw / Math.max(bh, 1);
+  // 单人常见竖向/半身比例；过扁更像多人横排或家具组合
+  let shape = 1;
+  if (person) {
+    if (aspect >= 0.22 && aspect <= 0.85) shape = 1.2;
+    else if (aspect > 1.15) shape = 0.45;
+    else shape = 0.75;
+  } else if (aspect > 1.8 || aspect < 0.15) {
+    shape = 0.55;
+  }
+
+  const personBoost = person ? 1.7 : 1;
+  return sweet * (0.3 + 0.7 * conf) * (0.4 + 0.6 * center) * shape * personBoost;
+}
+
+function intersectionArea(a, b) {
+  if (!a || !b || a.length < 4 || b.length < 4) return 0;
+  const ax1 = Math.min(a[0], a[2]);
+  const ay1 = Math.min(a[1], a[3]);
+  const ax2 = Math.max(a[0], a[2]);
+  const ay2 = Math.max(a[1], a[3]);
+  const bx1 = Math.min(b[0], b[2]);
+  const by1 = Math.min(b[1], b[3]);
+  const bx2 = Math.max(b[0], b[2]);
+  const by2 = Math.max(b[1], b[3]);
+  const ix1 = Math.max(ax1, bx1);
+  const iy1 = Math.max(ay1, by1);
+  const ix2 = Math.min(ax2, bx2);
+  const iy2 = Math.min(ay2, by2);
+  return Math.max(0, ix2 - ix1) * Math.max(0, iy2 - iy1);
+}
+
+/** outer 是否大面积包住 inner（典型「组合大框」） */
+function mostlyContains(outer, inner) {
+  const innerArea = boxArea(inner);
+  const outerArea = boxArea(outer);
+  if (innerArea <= 0 || outerArea <= 0) return false;
+  if (outerArea < innerArea * 1.12) return false;
+  return intersectionArea(outer, inner) / innerArea >= 0.7;
+}
+
+/**
+ * 去掉「包住多个体」的并集大框，只留更像独立个体的框
+ */
+function keepAtomicIndividuals(list) {
+  const items = list || [];
+  if (items.length <= 1) return items.slice();
+
+  const significant = items.filter(function (o) {
+    return (Number(o.score) || 0) >= 0.2 && boxArea(o.bbox) > 0;
+  });
+  const pool = significant.length ? significant : items;
+
+  const atomic = [];
+  for (let i = 0; i < pool.length; i++) {
+    const cand = pool[i];
+    let childCount = 0;
+    let dominatedBySmaller = false;
+
+    for (let j = 0; j < pool.length; j++) {
+      if (i === j) continue;
+      const other = pool[j];
+      if (mostlyContains(cand.bbox, other.bbox)) {
+        childCount += 1;
+        // 内部已有更紧的个体 → 大框是组合框，丢弃
+        if (boxArea(cand.bbox) > boxArea(other.bbox) * 1.2) {
+          dominatedBySmaller = true;
+        }
+      }
+    }
+
+    // 包住 ≥2 个其它检测 = 多物体并集
+    if (childCount >= 2) continue;
+    if (dominatedBySmaller && childCount >= 1) continue;
+    atomic.push(cand);
+  }
+
+  return atomic.length ? atomic : pool;
 }
 
 function detectionsToObjects(result) {
@@ -415,7 +501,7 @@ function detectionsToObjects(result) {
 }
 
 /**
- * 检测画面主体。VIDEO 模式 + 时序平滑，优先锁定人像主体。
+ * 检测画面主体。VIDEO 模式 + 原子个体筛选 + 时序平滑。
  */
 export async function detectSubjects(source, onProgress) {
   if (!detector || !warmed) {
@@ -454,7 +540,10 @@ export async function analyzeFrame(source, onProgress) {
 }
 
 /**
- * 有人优先；多人时用「面积×置信度×居中」选最像拍摄主体的一个
+ * 只选「某一个独立个体」：
+ * 1) 有人则只在人里选
+ * 2) 去掉包住多个检测的并集大框
+ * 3) 用单体显著性打分
  */
 export function pickPrimarySubject(objects, imgW, imgH) {
   const list = objects || [];
@@ -466,7 +555,10 @@ export function pickPrimarySubject(objects, imgW, imgH) {
     if (isPersonLabel(list[i].label)) people.push(list[i]);
     else others.push(list[i]);
   }
-  const pool = people.length ? people : others;
+
+  // 人像场景：强制在 person 里选一个，避免框到「人+椅子+包」的大并集
+  const basePool = people.length ? people : others;
+  const pool = keepAtomicIndividuals(basePool);
 
   let best = null;
   let bestScore = -1;
@@ -481,7 +573,7 @@ export function pickPrimarySubject(objects, imgW, imgH) {
 }
 
 /**
- * IoU 跟踪平滑：同一主体插值；切换需明显更优，减少绿框乱跳
+ * IoU 跟踪平滑；拒绝跳到明显更大的「组合框」
  */
 export function stabilizeSubject(next, imgW, imgH) {
   if (!next || !next.bbox) {
@@ -496,20 +588,30 @@ export function stabilizeSubject(next, imgW, imgH) {
     return trackedSubject;
   }
 
+  const prevArea = boxArea(trackedSubject.bbox);
+  const nextArea = boxArea(next.bbox);
+  // 新框突然大很多且包住旧框 → 多半是并集误检，忽略
+  if (
+    nextArea > prevArea * 1.85 &&
+    mostlyContains(next.bbox, trackedSubject.bbox)
+  ) {
+    return trackedSubject;
+  }
+
   const iou = boxIoU(trackedSubject.bbox, next.bbox);
   const nextSal = subjectSalience(next, imgW, imgH);
   const prevSal = subjectSalience(trackedSubject, imgW, imgH);
 
-  if (iou >= 0.25) {
+  if (iou >= 0.28) {
     trackedSubject = {
       label: next.label || trackedSubject.label,
       score: next.score,
-      bbox: lerpBox(trackedSubject.bbox, next.bbox, 0.4),
+      bbox: lerpBox(trackedSubject.bbox, next.bbox, 0.35),
     };
     return trackedSubject;
   }
 
-  if (nextSal > prevSal * 1.25 && nextSal > 0.08) {
+  if (nextSal > prevSal * 1.35 && nextSal > 0.1) {
     trackedSubject = {
       label: next.label,
       score: next.score,
@@ -518,11 +620,11 @@ export function stabilizeSubject(next, imgW, imgH) {
     return trackedSubject;
   }
 
-  if (iou > 0.05) {
+  if (iou > 0.08) {
     trackedSubject = {
       label: trackedSubject.label,
       score: trackedSubject.score,
-      bbox: lerpBox(trackedSubject.bbox, next.bbox, 0.12),
+      bbox: lerpBox(trackedSubject.bbox, next.bbox, 0.1),
     };
   }
   return trackedSubject;

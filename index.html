@@ -1562,7 +1562,7 @@
           base = pathName + "/" + fileName;
         }
         // 同域优先；jsDelivr 作备用（Pages 延迟时）
-        return base + "?v=20260925-subject1";
+        return base + "?v=20260925-atomic1";
       }
 
       function setCoachHint(text) {
@@ -1710,7 +1710,7 @@
           return coachEngine;
         } catch (_) {
           coachEngine = await import(
-            "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/coach-engine.js?v=20260925-subject1"
+            "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/coach-engine.js?v=20260925-atomic1"
           );
           return coachEngine;
         }
