@@ -6,3 +6,6 @@ node_modules/
 .venv/
 build/
 DerivedData/
+
+# 图标概念稿仅本地挑选，不入库
+icons/concepts/

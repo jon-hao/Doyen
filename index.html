@@ -8,8 +8,16 @@
   />
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="doyen-app-version" content="0.100" />
+  <meta name="apple-mobile-web-app-title" content="Doyen" />
+  <meta name="application-name" content="Doyen" />
+  <meta name="theme-color" content="#1a1a1a" />
+  <meta name="doyen-app-version" content="0.102" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="icons/favicon-16.png" />
   <title>Doyen Camera</title>
   <style>
     :root {
@@ -837,7 +845,7 @@
   <script>
     (function () {
       /** 与 version.json 同步；发版时两处一起改 */
-      const APP_VERSION = "0.101";
+      const APP_VERSION = "0.102";
       const VERSION_RELOAD_KEY = "doyen_reload_for";
 
       async function checkAppVersionAndUpdate() {
