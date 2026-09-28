@@ -558,7 +558,7 @@
     #compFrame {
       position: absolute;
       inset: 0;
-      border: 2px solid rgba(239, 68, 68, 0.25);
+      border: 8px solid rgba(239, 68, 68, 0.45);
       border-radius: 0;
       box-sizing: border-box;
       transition: border-color 0.25s ease;
@@ -668,32 +668,42 @@
       opacity: 1;
     }
 
-    /* 拍照后全屏预览 */
+    /* 拍照后全屏预览：照片铺满，按钮半透明浮层 */
     #review {
       position: absolute;
       inset: 0;
       z-index: 40;
       display: none;
-      flex-direction: column;
       background: #000;
     }
     #review.show {
-      display: flex;
+      display: block;
     }
     #reviewImg {
-      flex: 1;
+      position: absolute;
+      inset: 0;
       width: 100%;
-      object-fit: contain;
+      height: 100%;
+      object-fit: cover;
       background: #000;
       pointer-events: none;
     }
     #reviewActions {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
       display: flex;
       justify-content: space-between;
       align-items: center;
       gap: 16px;
       padding: 16px 24px calc(22px + var(--safe-bottom));
       pointer-events: auto;
+      background: linear-gradient(
+        to top,
+        rgba(0, 0, 0, 0.45),
+        rgba(0, 0, 0, 0)
+      );
     }
     #reviewActions button {
       min-width: 120px;
@@ -702,13 +712,15 @@
       border-radius: 999px;
       font-size: 16px;
       font-weight: 600;
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
     }
     #reviewCancel {
-      background: rgba(255, 255, 255, 0.16);
-      color: rgba(255, 255, 255, 0.9);
+      background: rgba(255, 255, 255, 0.22);
+      color: rgba(255, 255, 255, 0.92);
     }
     #reviewSave {
-      background: rgba(255, 255, 255, 0.92);
+      background: rgba(255, 255, 255, 0.72);
       color: #111;
     }
 
@@ -1072,12 +1084,17 @@
         };
       }
 
+      let cameraGen = 0;
+
       function layoutVideos() {
         const size = getStageSize();
         const sw = size.sw;
         const sh = size.sh;
         const vw = video.videoWidth | 0;
         const vh = video.videoHeight | 0;
+
+        // 元数据未就绪时绝不改布局，避免切镜头瞬间被压成黑边小窗
+        if (!vw || !vh || !sw || !sh) return;
 
         video.style.position = "absolute";
         video.style.top = "50%";
@@ -1089,28 +1106,15 @@
         video.style.border = "0";
         video.style.maxWidth = "none";
         video.style.maxHeight = "none";
+        video.style.minWidth = "0";
+        video.style.minHeight = "0";
         video.style.zIndex = "0";
-        // 禁止依赖 object-fit：iOS 上对 <video> 经常失效导致黑框
         video.style.objectFit = "fill";
         video.style.objectPosition = "center center";
+        video.style.width = vw + "px";
+        video.style.height = vh + "px";
 
-        let cover = 1;
-        if (vw > 0 && vh > 0) {
-          // 元素保持视频原生比例，用 transform scale 做 cover（iOS 可靠）
-          video.style.width = vw + "px";
-          video.style.height = vh + "px";
-          video.style.minWidth = "0";
-          video.style.minHeight = "0";
-          cover = Math.max(sw / vw, sh / vh);
-        } else {
-          // 元数据未到：先用 min 边撑满，避免 300×150 小窗
-          video.style.width = "auto";
-          video.style.height = "auto";
-          video.style.minWidth = sw + "px";
-          video.style.minHeight = sh + "px";
-          cover = 1;
-        }
-
+        const cover = Math.max(sw / vw, sh / vh);
         const zoom = digitalScale > 1.01 ? digitalScale : 1;
         const s = cover * zoom;
         const sx = facingMode === "user" ? -s : s;
@@ -1130,10 +1134,56 @@
           layoutVideos();
           requestAnimationFrame(layoutVideos);
         });
-        // iOS 切镜头 / 地址栏伸缩后尺寸常晚一拍
         setTimeout(layoutVideos, 50);
         setTimeout(layoutVideos, 200);
         setTimeout(layoutVideos, 500);
+      }
+
+      /** 等到新流真正有宽高再布局，避免用旧尺寸/0 尺寸布局 */
+      function waitForVideoReady(gen) {
+        return new Promise(function (resolve) {
+          let settled = false;
+          function ready() {
+            return (
+              (video.videoWidth | 0) > 0 &&
+              (video.videoHeight | 0) > 0 &&
+              video.readyState >= 1
+            );
+          }
+          function finish() {
+            if (settled) return;
+            if (gen !== cameraGen) {
+              settled = true;
+              cleanup();
+              resolve(false);
+              return;
+            }
+            if (!ready()) return;
+            settled = true;
+            cleanup();
+            resolve(true);
+          }
+          function cleanup() {
+            window.clearInterval(poll);
+            window.clearTimeout(timer);
+            video.removeEventListener("loadedmetadata", finish);
+            video.removeEventListener("loadeddata", finish);
+            video.removeEventListener("playing", finish);
+            video.removeEventListener("resize", finish);
+          }
+          video.addEventListener("loadedmetadata", finish);
+          video.addEventListener("loadeddata", finish);
+          video.addEventListener("playing", finish);
+          video.addEventListener("resize", finish);
+          const poll = window.setInterval(finish, 50);
+          const timer = window.setTimeout(function () {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            resolve(ready() && gen === cameraGen);
+          }, 2800);
+          if (ready()) finish();
+        });
       }
 
       async function resumePreview() {
@@ -1182,6 +1232,7 @@
       }
 
       async function openCamera(facing, deviceId) {
+        const gen = ++cameraGen;
         const videoConstraint = deviceId
           ? {
               deviceId: { exact: deviceId },
@@ -1204,19 +1255,37 @@
           });
         }
 
+        if (gen !== cameraGen) {
+          next.getTracks().forEach(function (t) { t.stop(); });
+          return;
+        }
+
         const prev = stream;
         stream = next;
         video.srcObject = stream;
-        scheduleLayoutVideos();
+        digitalScale = 1;
+
         try {
           await video.play();
-          scheduleLayoutVideos();
         } catch (err) {
+          if (gen !== cameraGen) {
+            next.getTracks().forEach(function (t) { t.stop(); });
+            return;
+          }
           next.getTracks().forEach(function (t) { t.stop(); });
           stream = prev;
           video.srcObject = prev;
           if (prev) await video.play().catch(function () {});
           throw err;
+        }
+
+        const ok = await waitForVideoReady(gen);
+        if (gen !== cameraGen) {
+          next.getTracks().forEach(function (t) { t.stop(); });
+          return;
+        }
+        if (!ok) {
+          // 仍尽量布局一次；若宽高仍为 0 则 layoutVideos 会自行跳过
         }
 
         if (prev && prev !== stream) {
@@ -1240,7 +1309,7 @@
 
         refreshHwZoom();
         digitalScale = 1;
-        updatePreviewTransform();
+        scheduleLayoutVideos();
         updateZoomButtons();
         updateFocalAvailability();
       }
@@ -1718,7 +1787,6 @@
           if (next === "user") {
             zoomFactor = 1;
             digitalScale = 1;
-            updatePreviewTransform();
             updateFocalAvailability();
             if (coachActive) stopSubjectTracking();
           } else {
@@ -1726,11 +1794,14 @@
             await applyZoomFactor(presets.defaultZoom);
             updateFocalAvailability();
           }
+          scheduleLayoutVideos();
         } catch (err) {
           showToast(err.message || "切换摄像头失败", "err");
+          scheduleLayoutVideos();
         } finally {
           flipping = false;
           flipBtn.disabled = false;
+          scheduleLayoutVideos();
         }
       }
 
@@ -1891,7 +1962,7 @@
           base = pathName + "/" + fileName;
         }
         // 同域优先；jsDelivr 作备用（Pages 延迟时）
-        return base + "?v=20260925-comp2";
+        return base + "?v=20260928-fix1";
       }
 
       /** 已成功加载过：静默热启动，不闪「下载资源」 */
@@ -2044,7 +2115,7 @@
           return coachEngine;
         } catch (_) {
           coachEngine = await import(
-            "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/coach-engine.js?v=20260925-comp2"
+            "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/coach-engine.js?v=20260928-fix1"
           );
           return coachEngine;
         }
@@ -2057,7 +2128,7 @@
           return compositionCoach;
         } catch (_) {
           compositionCoach = await import(
-            "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/composition-coach.js?v=20260925-comp2"
+            "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/composition-coach.js?v=20260928-fix1"
           );
           return compositionCoach;
         }
@@ -2105,8 +2176,7 @@
         compGuide.classList.add("show");
         compGuide.setAttribute("aria-hidden", "false");
         if (compFrame) {
-          // 75% 透明 ≈ alpha 0.25
-          const a = "0.25";
+          const a = "0.45";
           if (guide.grade === "S") {
             compFrame.style.borderColor = "rgba(74, 222, 128, " + a + ")";
           } else if (guide.grade === "A") {
@@ -2357,124 +2427,84 @@
         }
       }
 
-      /** Moore 邻域追踪：得到闭合轮廓点列（掩码坐标） */
-      function traceMaskContour(data, mw, mh) {
-        function on(x, y) {
-          if (x < 0 || y < 0 || x >= mw || y >= mh) return false;
-          return data[y * mw + x] > 0;
-        }
-        let sx = -1;
-        let sy = -1;
-        outer: for (let y = 0; y < mh; y++) {
-          for (let x = 0; x < mw; x++) {
-            if (on(x, y) && (!on(x - 1, y) || !on(x, y - 1))) {
-              sx = x;
-              sy = y;
-              break outer;
-            }
-          }
-        }
-        if (sx < 0) return null;
-
-        // 8 邻域顺时针：从左开始
-        const dx = [-1, -1, 0, 1, 1, 1, 0, -1];
-        const dy = [0, -1, -1, -1, 0, 1, 1, 1];
-        const pts = [];
-        let x = sx;
-        let y = sy;
-        let dir = 0;
-        const maxSteps = mw * mh * 2;
-        for (let step = 0; step < maxSteps; step++) {
-          pts.push([x + 0.5, y + 0.5]);
-          let found = false;
-          // 从进入方向的后方开始搜，保证贴边
-          const start = (dir + 6) % 8;
-          for (let k = 0; k < 8; k++) {
-            const nd = (start + k) % 8;
-            const nx = x + dx[nd];
-            const ny = y + dy[nd];
-            if (on(nx, ny)) {
-              x = nx;
-              y = ny;
-              dir = nd;
-              found = true;
-              break;
-            }
-          }
-          if (!found) break;
-          if (x === sx && y === sy && pts.length > 8) break;
-        }
-        if (pts.length < 8) return null;
-        return pts;
+      /** 轮廓：填充 + 相邻边缘像素连线（连续无断点），微动时轻量稳定 */
+      function isMaskOn(data, mw, mh, x, y) {
+        if (x < 0 || y < 0 || x >= mw || y >= mh) return false;
+        return data[y * mw + x] > 0;
       }
 
-      function maskOverlapRatio(a, b) {
-        if (!a || !b || a.width !== b.width || a.height !== b.height) return 0;
-        const n = a.data.length;
-        let inter = 0;
-        let uni = 0;
-        const step = Math.max(1, (n / 12000) | 0);
-        for (let i = 0; i < n; i += step) {
-          const aa = a.data[i] > 0;
-          const bb = b.data[i] > 0;
-          if (aa || bb) uni += 1;
-          if (aa && bb) inter += 1;
-        }
-        return uni > 0 ? inter / uni : 0;
+      function isMaskEdge(data, mw, mh, x, y) {
+        if (!isMaskOn(data, mw, mh, x, y)) return false;
+        return (
+          !isMaskOn(data, mw, mh, x - 1, y) ||
+          !isMaskOn(data, mw, mh, x + 1, y) ||
+          !isMaskOn(data, mw, mh, x, y - 1) ||
+          !isMaskOn(data, mw, mh, x, y + 1)
+        );
       }
 
       let stableMask = null;
       let stableMaskBbox = null;
+      let stableMaskHold = 0;
 
       function stabilizeDisplayMask(nextMask, bbox) {
         if (!nextMask || !nextMask.data) return stableMask;
         if (!stableMask || !stableMaskBbox || !bbox) {
           stableMask = nextMask;
           stableMaskBbox = bbox.slice();
+          stableMaskHold = 0;
           return stableMask;
         }
-        const iou = (function () {
-          const a = stableMaskBbox;
-          const b = bbox;
-          const ax1 = Math.min(a[0], a[2]);
-          const ay1 = Math.min(a[1], a[3]);
-          const ax2 = Math.max(a[0], a[2]);
-          const ay2 = Math.max(a[1], a[3]);
-          const bx1 = Math.min(b[0], b[2]);
-          const by1 = Math.min(b[1], b[3]);
-          const bx2 = Math.max(b[0], b[2]);
-          const by2 = Math.max(b[1], b[3]);
-          const ix1 = Math.max(ax1, bx1);
-          const iy1 = Math.max(ay1, by1);
-          const ix2 = Math.min(ax2, bx2);
-          const iy2 = Math.min(ay2, by2);
-          const iw = Math.max(0, ix2 - ix1);
-          const ih = Math.max(0, iy2 - iy1);
-          const inter = iw * ih;
-          if (inter <= 0) return 0;
-          const uni =
-            (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter;
-          return uni > 0 ? inter / uni : 0;
-        })();
-        const overlap = maskOverlapRatio(stableMask, nextMask);
-        // 镜头几乎不动：保持旧轮廓，避免微抖动
-        if (iou >= 0.72 && overlap >= 0.78) {
-          return stableMask;
-        }
-        if (iou >= 0.55 && overlap >= 0.88) {
+        const a = stableMaskBbox;
+        const b = bbox;
+        const acx = (Math.min(a[0], a[2]) + Math.max(a[0], a[2])) / 2;
+        const acy = (Math.min(a[1], a[3]) + Math.max(a[1], a[3])) / 2;
+        const bcx = (Math.min(b[0], b[2]) + Math.max(b[0], b[2])) / 2;
+        const bcy = (Math.min(b[1], b[3]) + Math.max(b[1], b[3])) / 2;
+        const minSide = Math.max(
+          1,
+          Math.min(
+            Math.abs(a[2] - a[0]) + Math.abs(b[2] - b[0]),
+            Math.abs(a[3] - a[1]) + Math.abs(b[3] - b[1])
+          ) / 2
+        );
+        const shift =
+          Math.sqrt((acx - bcx) * (acx - bcx) + (acy - bcy) * (acy - bcy)) /
+          minSide;
+        const ax1 = Math.min(a[0], a[2]);
+        const ay1 = Math.min(a[1], a[3]);
+        const ax2 = Math.max(a[0], a[2]);
+        const ay2 = Math.max(a[1], a[3]);
+        const bx1 = Math.min(b[0], b[2]);
+        const by1 = Math.min(b[1], b[3]);
+        const bx2 = Math.max(b[0], b[2]);
+        const by2 = Math.max(b[1], b[3]);
+        const ix1 = Math.max(ax1, bx1);
+        const iy1 = Math.max(ay1, by1);
+        const ix2 = Math.min(ax2, bx2);
+        const iy2 = Math.min(ay2, by2);
+        const inter = Math.max(0, ix2 - ix1) * Math.max(0, iy2 - iy1);
+        const uni =
+          (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter;
+        const iou = uni > 0 ? inter / uni : 0;
+
+        // 仅在几乎重叠且中心几乎不动时冻住；否则立刻更新，避免缩成绿点
+        if (iou >= 0.88 && shift < 0.04) {
+          stableMaskHold += 1;
           return stableMask;
         }
         stableMask = nextMask;
         stableMaskBbox = bbox.slice();
+        stableMaskHold = 0;
         return stableMask;
       }
 
       function clearStableMask() {
         stableMask = null;
         stableMaskBbox = null;
+        stableMaskHold = 0;
       }
 
-      /** 轮廓：半透明填充 + 连续平滑描边 */
       function drawSubjectContour(mask, bbox, srcW, srcH) {
         sizeSubjectOverlay();
         const ctx = subjectOverlay.getContext("2d");
@@ -2489,31 +2519,75 @@
         const ox = (ow - dw) / 2;
         const oy = (oh - dh) / 2;
 
-        const useMask = mask && mask.data && mask.width && mask.height
-          ? stabilizeDisplayMask(mask, bbox)
-          : null;
+        const useMask =
+          mask && mask.data && mask.width && mask.height && bbox
+            ? stabilizeDisplayMask(mask, bbox)
+            : mask && mask.data
+              ? mask
+              : null;
 
-        if (useMask && useMask.data) {
+        if (useMask && useMask.data && useMask.width > 2 && useMask.height > 2) {
           const mw = useMask.width;
           const mh = useMask.height;
           const sx = dw / mw;
           const sy = dh / mh;
-          const pts = traceMaskContour(useMask.data, mw, mh);
-          if (pts && pts.length >= 8) {
-            ctx.save();
-            ctx.beginPath();
-            ctx.moveTo(ox + pts[0][0] * sx, oy + pts[0][1] * sy);
-            for (let i = 1; i < pts.length; i++) {
-              ctx.lineTo(ox + pts[i][0] * sx, oy + pts[i][1] * sy);
+          const src = useMask.data;
+
+          // 半透明填充
+          const img = ctx.createImageData(mw, mh);
+          const px = img.data;
+          let onCount = 0;
+          for (let i = 0; i < mw * mh; i++) {
+            const o = i * 4;
+            if (src[i] > 0) {
+              onCount += 1;
+              px[o] = 74;
+              px[o + 1] = 222;
+              px[o + 2] = 128;
+              px[o + 3] = 52;
             }
-            ctx.closePath();
-            ctx.fillStyle = "rgba(74, 222, 128, 0.2)";
-            ctx.fill();
-            ctx.strokeStyle = "rgba(74, 222, 128, 0.9)";
-            ctx.lineWidth = Math.max(2.5, Math.round(ow / 160));
+          }
+          // 掩码异常（几乎全空）时退回 bbox，避免绿点
+          if (onCount < 24) {
+            // fall through to bbox
+          } else {
+            const tmp = document.createElement("canvas");
+            tmp.width = mw;
+            tmp.height = mh;
+            tmp.getContext("2d").putImageData(img, 0, 0);
+            ctx.save();
+            ctx.imageSmoothingEnabled = true;
+            ctx.drawImage(tmp, ox, oy, dw, dh);
+
+            // 边缘相邻像素连线 → 连续丝滑描边
+            ctx.beginPath();
+            ctx.strokeStyle = "rgba(74, 222, 128, 0.92)";
+            ctx.lineWidth = Math.max(2.5, Math.round(ow / 150));
             ctx.lineJoin = "round";
             ctx.lineCap = "round";
-            ctx.miterLimit = 2;
+            for (let y = 0; y < mh; y++) {
+              for (let x = 0; x < mw; x++) {
+                if (!isMaskEdge(src, mw, mh, x, y)) continue;
+                const x0 = ox + (x + 0.5) * sx;
+                const y0 = oy + (y + 0.5) * sy;
+                if (isMaskEdge(src, mw, mh, x + 1, y)) {
+                  ctx.moveTo(x0, y0);
+                  ctx.lineTo(ox + (x + 1.5) * sx, y0);
+                }
+                if (isMaskEdge(src, mw, mh, x, y + 1)) {
+                  ctx.moveTo(x0, y0);
+                  ctx.lineTo(x0, oy + (y + 1.5) * sy);
+                }
+                if (isMaskEdge(src, mw, mh, x + 1, y + 1)) {
+                  ctx.moveTo(x0, y0);
+                  ctx.lineTo(ox + (x + 1.5) * sx, oy + (y + 1.5) * sy);
+                }
+                if (isMaskEdge(src, mw, mh, x - 1, y + 1)) {
+                  ctx.moveTo(x0, y0);
+                  ctx.lineTo(ox + (x - 0.5) * sx, oy + (y + 1.5) * sy);
+                }
+              }
+            }
             ctx.stroke();
             ctx.restore();
             return;
@@ -2742,24 +2816,22 @@
         try {
           const snap = captureDetectCanvas();
           const pt = mapOverlayToSrc(clientX, clientY, snap.srcW, snap.srcH);
+          if (
+            pt.x < -8 ||
+            pt.y < -8 ||
+            pt.x > snap.srcW + 8 ||
+            pt.y > snap.srcH + 8
+          ) {
+            return;
+          }
           const modeNow =
             shootMode === "portrait" ? "portrait" : "landscape";
-          let objects = lastTapObjects;
-          if (!objects || !objects.length) {
-            const vision = await coachEngine.detectSubjects(snap.canvas, null, {
-              mode: modeNow,
-              holdOrientation: getHoldOrientation(),
-            });
-            objects = vision.objects || [];
-            if (vision.primary && vision.primary.bbox) {
-              drawSubjectContour(
-                vision.mask,
-                vision.primary.bbox,
-                snap.srcW,
-                snap.srcH
-              );
-            }
-          }
+          // 点击锁定始终用当前帧重检，避免旧 objects 导致失效
+          const vision = await coachEngine.detectSubjects(snap.canvas, null, {
+            mode: modeNow,
+            holdOrientation: getHoldOrientation(),
+          });
+          const objects = vision.objects || [];
           lastTapObjects = objects;
           lastTapSize = { w: snap.srcW, h: snap.srcH };
           if (!coachEngine.pinSubjectAt) return;
@@ -2772,6 +2844,7 @@
             modeNow
           );
           if (pinned && pinned.bbox) {
+            clearStableMask();
             const mask =
               coachEngine.segmentSubjectMask &&
               coachEngine.segmentSubjectMask(
@@ -2779,11 +2852,18 @@
                 pinned.nx,
                 pinned.ny
               );
-            drawSubjectContour(mask, pinned.bbox, snap.srcW, snap.srcH);
+            drawSubjectContour(
+              mask || vision.mask,
+              pinned.bbox,
+              snap.srcW,
+              snap.srcH
+            );
             if (shootMode === "landscape") {
               updateCompositionGuide(pinned, snap.srcW, snap.srcH);
             }
+            // 软刷新跟踪，但不硬清 pin
             coachReanalyzeSoon = true;
+            coachHardReset = false;
           }
         } catch (_) {}
       }

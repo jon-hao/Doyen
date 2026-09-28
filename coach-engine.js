@@ -985,7 +985,7 @@ export function pinSubjectAt(objects, x, y, imgW, imgH, mode) {
 
   const w = Math.max(1, imgW || 1);
   const h = Math.max(1, imgH || 1);
-  const radius = Math.min(w, h) * 0.1;
+  const radius = Math.min(w, h) * 0.16;
   let best = null;
   let bestRank = Infinity;
 
@@ -1263,8 +1263,8 @@ export function stabilizeSubject(next, imgW, imgH, mode) {
   const areaDelta =
     Math.abs(nextArea - prevArea) / Math.max(prevArea, 1);
 
-  // 死区加宽：轻微晃动完全不改框
-  if (iou >= 0.5 && shift < 0.045 && areaDelta < 0.16) {
+  // 轻微晃动：框基本不动，但不要过死以免锁死旧主体
+  if (iou >= 0.62 && shift < 0.035 && areaDelta < 0.14) {
     trackedSubject = {
       label: next.label || trackedSubject.label,
       score: next.score,
@@ -1273,9 +1273,9 @@ export function stabilizeSubject(next, imgW, imgH, mode) {
     return trackedSubject;
   }
 
-  // 同主体缓动：极低跟随
+  // 同主体缓动
   if (iou >= 0.28) {
-    const t = iou >= 0.48 && shift < 0.08 ? 0.05 : 0.12;
+    const t = iou >= 0.5 && shift < 0.07 ? 0.1 : 0.22;
     trackedSubject = {
       label: next.label || trackedSubject.label,
       score: next.score,
@@ -1288,7 +1288,7 @@ export function stabilizeSubject(next, imgW, imgH, mode) {
     trackedSubject = {
       label: next.label || trackedSubject.label,
       score: next.score,
-      bbox: lerpBox(trackedSubject.bbox, next.bbox, 0.32),
+      bbox: lerpBox(trackedSubject.bbox, next.bbox, 0.4),
     };
     return trackedSubject;
   }
