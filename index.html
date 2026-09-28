@@ -13,7 +13,7 @@
   <meta name="apple-mobile-web-app-title" content="Doyen" />
   <meta name="application-name" content="Doyen" />
   <meta name="theme-color" content="#1a1a1a" />
-  <meta name="doyen-app-version" content="0.102" />
+  <meta name="doyen-app-version" content="0.103" />
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
   <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png" />
@@ -845,7 +845,7 @@
   <script>
     (function () {
       /** 与 version.json 同步；发版时两处一起改 */
-      const APP_VERSION = "0.102";
+      const APP_VERSION = "0.103";
       const VERSION_RELOAD_KEY = "doyen_reload_for";
 
       async function checkAppVersionAndUpdate() {
@@ -3081,16 +3081,32 @@
           );
           if (pinned && pinned.bbox) {
             clearStableMask();
-            const mask =
+            let mask =
               coachEngine.segmentSubjectMask &&
               coachEngine.segmentSubjectMask(
                 snap.canvas,
                 pinned.nx,
                 pinned.ny
               );
+            let drawBox = pinned.bbox;
+            if (mask && coachEngine.finalizeSingleSubjectMask) {
+              const refined = coachEngine.finalizeSingleSubjectMask(
+                mask,
+                pinned.nx,
+                pinned.ny,
+                pinned.bbox,
+                snap.srcW,
+                snap.srcH
+              );
+              mask = refined.mask || mask;
+              if (refined.bbox) {
+                drawBox = refined.bbox;
+                pinned.bbox = refined.bbox.slice();
+              }
+            }
             drawSubjectContour(
               mask || vision.mask,
-              pinned.bbox,
+              drawBox,
               snap.srcW,
               snap.srcH
             );

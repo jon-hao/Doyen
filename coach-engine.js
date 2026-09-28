@@ -300,7 +300,7 @@ async function createDetector(onProgress) {
         delegate: "CPU",
       },
       scoreThreshold: 0.26,
-      maxResults: 16,
+      maxResults: 10,
       runningMode: "VIDEO",
     });
     deviceUsed = "wasm";
@@ -311,7 +311,7 @@ async function createDetector(onProgress) {
         delegate: "GPU",
       },
       scoreThreshold: 0.26,
-      maxResults: 16,
+      maxResults: 10,
       runningMode: "VIDEO",
     });
     deviceUsed = "webgl";
@@ -830,43 +830,280 @@ function mostlyContains(outer, inner) {
   return intersectionArea(outer, inner) / innerArea >= 0.7;
 }
 
+function boxCenterXY(b) {
+  return {
+    x: (Math.min(b[0], b[2]) + Math.max(b[0], b[2])) / 2,
+    y: (Math.min(b[1], b[3]) + Math.max(b[1], b[3])) / 2,
+  };
+}
+
+function pointInBox(x, y, b) {
+  if (!b) return false;
+  return (
+    x >= Math.min(b[0], b[2]) &&
+    x <= Math.max(b[0], b[2]) &&
+    y >= Math.min(b[1], b[3]) &&
+    y <= Math.max(b[1], b[3])
+  );
+}
+
 /**
- * 去掉「包住多个体」的并集大框，只留更像独立个体的框
+ * Greedy NMS（EfficientDet 后处理同思路）：重叠框只留最高分，避免同物多框。
+ * @param {Array} list
+ * @param {number=} iouThresh
+ */
+function nmsKeepBest(list, iouThresh) {
+  const thr = typeof iouThresh === "number" ? iouThresh : 0.48;
+  const items = (list || [])
+    .filter(function (o) {
+      return o && o.bbox && boxArea(o.bbox) > 0;
+    })
+    .slice()
+    .sort(function (a, b) {
+      return (Number(b.score) || 0) - (Number(a.score) || 0);
+    });
+  const kept = [];
+  for (let i = 0; i < items.length; i++) {
+    const cand = items[i];
+    let overlap = false;
+    for (let j = 0; j < kept.length; j++) {
+      if (boxIoU(cand.bbox, kept[j].bbox) >= thr) {
+        overlap = true;
+        break;
+      }
+    }
+    if (!overlap) kept.push(cand);
+  }
+  return kept;
+}
+
+/**
+ * 去掉「包住多个体」的并集大框，只留独立个体。
+ * 依据：containment + 中心落点计数（group-box rejection）。
  */
 function keepAtomicIndividuals(list) {
   const items = list || [];
   if (items.length <= 1) return items.slice();
 
   const significant = items.filter(function (o) {
-    return (Number(o.score) || 0) >= 0.2 && boxArea(o.bbox) > 0;
+    return (Number(o.score) || 0) >= 0.18 && boxArea(o.bbox) > 0;
   });
   const pool = significant.length ? significant : items;
 
   const atomic = [];
   for (let i = 0; i < pool.length; i++) {
     const cand = pool[i];
+    const candArea = boxArea(cand.bbox);
     let childCount = 0;
+    let centersInside = 0;
     let dominatedBySmaller = false;
+    let bestChildArea = 0;
+    let bestChildScore = 0;
 
     for (let j = 0; j < pool.length; j++) {
       if (i === j) continue;
       const other = pool[j];
+      const otherArea = boxArea(other.bbox);
+      const c = boxCenterXY(other.bbox);
+      if (pointInBox(c.x, c.y, cand.bbox) && otherArea < candArea * 0.92) {
+        centersInside += 1;
+        if (otherArea > bestChildArea) {
+          bestChildArea = otherArea;
+          bestChildScore = Number(other.score) || 0;
+        }
+      }
       if (mostlyContains(cand.bbox, other.bbox)) {
         childCount += 1;
-        // 内部已有更紧的个体 → 大框是组合框，丢弃
-        if (boxArea(cand.bbox) > boxArea(other.bbox) * 1.2) {
-          dominatedBySmaller = true;
-        }
+        if (candArea > otherArea * 1.15) dominatedBySmaller = true;
       }
     }
 
-    // 包住 ≥2 个其它检测 = 多物体并集
+    // ≥2 个检测中心落在框内 → 典型并集/人群大框
+    if (centersInside >= 2) continue;
+    // 包住 ≥2 个其它框
     if (childCount >= 2) continue;
+    // 内部已有更紧个体 → 大框是组合框
     if (dominatedBySmaller && childCount >= 1) continue;
+    // 单子体：父框明显更大且子体分数不差 → 留子去父
+    if (
+      centersInside === 1 &&
+      bestChildArea > 0 &&
+      candArea > bestChildArea * 1.35 &&
+      bestChildScore >= (Number(cand.score) || 0) * 0.7
+    ) {
+      continue;
+    }
     atomic.push(cand);
   }
 
   return atomic.length ? atomic : pool;
+}
+
+/**
+ * 从检测列表筛到「可竞选的单体」：NMS → 去并集框。
+ */
+function prepareSingleSubjectPool(list) {
+  return keepAtomicIndividuals(nmsKeepBest(list, 0.48));
+}
+
+/**
+ * 掩码连通域：只保留含种子点的一块（类 Apple instance lift / 最大显著轮廓）。
+ * 解决分割把两人粘在一起、或框外第二人被描边的问题。
+ * @returns {null|{width:number,height:number,data:Uint8Array,bbox:number[]}}
+ */
+function isolateSeedComponent(mask, nx, ny, imgW, imgH) {
+  if (!mask || !mask.data || !mask.width || !mask.height) return null;
+  const mw = mask.width | 0;
+  const mh = mask.height | 0;
+  const src = mask.data;
+  if (mw < 2 || mh < 2) return null;
+
+  let sx = Math.max(0, Math.min(mw - 1, Math.round((Number(nx) || 0.5) * (mw - 1))));
+  let sy = Math.max(0, Math.min(mh - 1, Math.round((Number(ny) || 0.5) * (mh - 1))));
+
+  // 种子不在前景：在邻域找最近前景
+  if (!(src[sy * mw + sx] > 0)) {
+    let found = false;
+    const maxR = Math.max(8, Math.round(Math.min(mw, mh) * 0.12));
+    for (let r = 1; r <= maxR && !found; r++) {
+      for (let dy = -r; dy <= r && !found; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (Math.abs(dx) !== r && Math.abs(dy) !== r) continue;
+          const x = sx + dx;
+          const y = sy + dy;
+          if (x < 0 || y < 0 || x >= mw || y >= mh) continue;
+          if (src[y * mw + x] > 0) {
+            sx = x;
+            sy = y;
+            found = true;
+            break;
+          }
+        }
+      }
+    }
+    if (!found) return null;
+  }
+
+  const visited = new Uint8Array(mw * mh);
+  const out = new Uint8Array(mw * mh);
+  const stack = [sy * mw + sx];
+  visited[sy * mw + sx] = 1;
+  let minX = sx;
+  let maxX = sx;
+  let minY = sy;
+  let maxY = sy;
+  let count = 0;
+
+  while (stack.length) {
+    const i = stack.pop();
+    if (!(src[i] > 0)) continue;
+    out[i] = 1;
+    count += 1;
+    const x = i % mw;
+    const y = (i / mw) | 0;
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+    const nbs = [i - 1, i + 1, i - mw, i + mw];
+    for (let k = 0; k < 4; k++) {
+      const j = nbs[k];
+      if (j < 0 || j >= src.length || visited[j]) continue;
+      const nx2 = j % mw;
+      const ny2 = (j / mw) | 0;
+      // 禁止跨行误连（左右边界）
+      if (Math.abs(nx2 - x) + Math.abs(ny2 - y) !== 1) continue;
+      visited[j] = 1;
+      if (src[j] > 0) stack.push(j);
+    }
+  }
+
+  if (count < 24) return null;
+
+  const scaleX = Math.max(1, imgW || mw) / mw;
+  const scaleY = Math.max(1, imgH || mh) / mh;
+  const pad = Math.max(1, Math.round(Math.min(maxX - minX, maxY - minY) * 0.04));
+  const bbox = [
+    Math.max(0, (minX - pad) * scaleX),
+    Math.max(0, (minY - pad) * scaleY),
+    Math.min(imgW || mw, (maxX + 1 + pad) * scaleX),
+    Math.min(imgH || mh, (maxY + 1 + pad) * scaleY),
+  ];
+
+  return { width: mw, height: mh, data: out, bbox: bbox };
+}
+
+/**
+ * 掩码裁到检测框外扩区域，避免第二人轮廓泄漏。
+ */
+function clipMaskToBox(mask, bbox, imgW, imgH, padRatio) {
+  if (!mask || !mask.data || !bbox) return mask;
+  const mw = mask.width | 0;
+  const mh = mask.height | 0;
+  const pad = typeof padRatio === "number" ? padRatio : 0.1;
+  const bw = Math.abs(bbox[2] - bbox[0]);
+  const bh = Math.abs(bbox[3] - bbox[1]);
+  const px = bw * pad;
+  const py = bh * pad;
+  const x1 = Math.min(bbox[0], bbox[2]) - px;
+  const y1 = Math.min(bbox[1], bbox[3]) - py;
+  const x2 = Math.max(bbox[0], bbox[2]) + px;
+  const y2 = Math.max(bbox[1], bbox[3]) + py;
+  const sx = mw / Math.max(1, imgW || mw);
+  const sy = mh / Math.max(1, imgH || mh);
+  const ix1 = Math.max(0, Math.floor(x1 * sx));
+  const iy1 = Math.max(0, Math.floor(y1 * sy));
+  const ix2 = Math.min(mw, Math.ceil(x2 * sx));
+  const iy2 = Math.min(mh, Math.ceil(y2 * sy));
+  const data = new Uint8Array(mw * mh);
+  const src = mask.data;
+  for (let y = iy1; y < iy2; y++) {
+    const row = y * mw;
+    for (let x = ix1; x < ix2; x++) {
+      data[row + x] = src[row + x] > 0 ? 1 : 0;
+    }
+  }
+  return { width: mw, height: mh, data: data };
+}
+
+/**
+ * 用单体掩码收紧 bbox（只缩小、不大扩），保证框体也不包两人。
+ */
+function tightenBoxWithMask(bbox, maskBbox) {
+  if (!bbox || !maskBbox) return bbox;
+  const ix1 = Math.max(Math.min(bbox[0], bbox[2]), Math.min(maskBbox[0], maskBbox[2]));
+  const iy1 = Math.max(Math.min(bbox[1], bbox[3]), Math.min(maskBbox[1], maskBbox[3]));
+  const ix2 = Math.min(Math.max(bbox[0], bbox[2]), Math.max(maskBbox[0], maskBbox[2]));
+  const iy2 = Math.min(Math.max(bbox[1], bbox[3]), Math.max(maskBbox[1], maskBbox[3]));
+  if (ix2 - ix1 < 4 || iy2 - iy1 < 4) return bbox;
+  const inter = (ix2 - ix1) * (iy2 - iy1);
+  const maskArea = boxArea(maskBbox);
+  // 交集太小说明分割漂移，保留原框
+  if (maskArea > 0 && inter / maskArea < 0.35) return bbox;
+  // 收紧后面积不应比原框大
+  if (inter > boxArea(bbox) * 1.05) return bbox;
+  return [ix1, iy1, ix2, iy2];
+}
+
+/**
+ * 分割后强制单实例：种子连通域 + 框内裁剪。
+ * @returns {{mask:object|null, bbox:number[]|null}}
+ */
+export function finalizeSingleSubjectMask(mask, nx, ny, bbox, imgW, imgH) {
+  if (!mask || !bbox) return { mask: mask || null, bbox: bbox || null };
+  let m = mask;
+  let b = bbox.slice();
+  const isolated = isolateSeedComponent(m, nx, ny, imgW, imgH);
+  if (isolated) {
+    m = {
+      width: isolated.width,
+      height: isolated.height,
+      data: isolated.data,
+    };
+    b = tightenBoxWithMask(b, isolated.bbox);
+  }
+  m = clipMaskToBox(m, b, imgW, imgH, 0.12);
+  return { mask: m, bbox: b };
 }
 
 function detectionsToObjects(result) {
@@ -925,7 +1162,7 @@ export async function detectSubjects(source, onProgress, options) {
       return isPersonLabel(o.label);
     });
   }
-
+  // 对外仍返回原始检测（点击选框用），但选主与描边走单体管线
   const primaryRaw = pickPrimarySubject(
     objects,
     canvas.width,
@@ -933,7 +1170,7 @@ export async function detectSubjects(source, onProgress, options) {
     mode,
     canvas
   );
-  const primary = stabilizeSubject(primaryRaw, canvas.width, canvas.height, mode);
+  let primary = stabilizeSubject(primaryRaw, canvas.width, canvas.height, mode);
 
   let mask = null;
   if (primary && primary.bbox) {
@@ -945,13 +1182,38 @@ export async function detectSubjects(source, onProgress, options) {
       (Math.min(primary.bbox[1], primary.bbox[3]) +
         Math.max(primary.bbox[1], primary.bbox[3])) /
       2;
-    const nx = pinnedSubject && typeof pinnedSubject.nx === "number"
-      ? pinnedSubject.nx
-      : cx / Math.max(1, canvas.width);
-    const ny = pinnedSubject && typeof pinnedSubject.ny === "number"
-      ? pinnedSubject.ny
-      : cy / Math.max(1, canvas.height);
+    const nx =
+      pinnedSubject && typeof pinnedSubject.nx === "number"
+        ? pinnedSubject.nx
+        : cx / Math.max(1, canvas.width);
+    const ny =
+      pinnedSubject && typeof pinnedSubject.ny === "number"
+        ? pinnedSubject.ny
+        : cy / Math.max(1, canvas.height);
     mask = segmentSubjectMask(canvas, nx, ny);
+    if (mask) {
+      const refined = finalizeSingleSubjectMask(
+        mask,
+        nx,
+        ny,
+        primary.bbox,
+        canvas.width,
+        canvas.height
+      );
+      mask = refined.mask;
+      if (refined.bbox) {
+        primary = {
+          label: primary.label,
+          score: primary.score,
+          bbox: refined.bbox.slice(),
+        };
+        if (trackedSubject) {
+          trackedSubject.bbox = refined.bbox.slice();
+          trackedSubject.label = primary.label;
+          trackedSubject.score = primary.score;
+        }
+      }
+    }
   }
 
   return {
@@ -977,7 +1239,7 @@ export function pinSubjectAt(objects, x, y, imgW, imgH, mode) {
       return isPersonLabel(o.label);
     });
   }
-  pool = keepAtomicIndividuals(pool);
+  pool = prepareSingleSubjectPool(pool);
   if (!pool.length) {
     pinnedSubject = null;
     return null;
@@ -1135,9 +1397,10 @@ export function pickPrimarySubject(objects, imgW, imgH, mode, canvas) {
     basePool = list;
   }
 
-  const pool = keepAtomicIndividuals(basePool);
+  const pool = prepareSingleSubjectPool(basePool);
   let best = null;
   let bestScore = -1;
+  let secondScore = -1;
   for (let i = 0; i < pool.length; i++) {
     let s = subjectSalience(pool[i], imgW, imgH, m, canvas);
 
@@ -1164,8 +1427,41 @@ export function pickPrimarySubject(objects, imgW, imgH, mode, canvas) {
       else if (iou >= 0.12) s += m === "portrait" ? 1.0 : 0.6;
     }
     if (s > bestScore) {
+      secondScore = bestScore;
       bestScore = s;
       best = pool[i];
+    } else if (s > secondScore) {
+      secondScore = s;
+    }
+  }
+
+  // Winner-takes-all：若次优几乎同分且不与最优重叠，仍只取最优（已保证单框）
+  // 若次优中心落在最优框内 → 最优多半是并集，改选更紧的次优
+  if (best && pool.length > 1 && secondScore > 0) {
+    let rival = null;
+    let rivalScore = -1;
+    for (let i = 0; i < pool.length; i++) {
+      if (pool[i] === best) continue;
+      let s = subjectSalience(pool[i], imgW, imgH, m, canvas);
+      if (trackedSubject && trackedSubject.bbox && pool[i].bbox) {
+        const iou = boxIoU(trackedSubject.bbox, pool[i].bbox);
+        if (iou >= 0.25) s += m === "portrait" ? 2.2 : 1.4;
+      }
+      if (s > rivalScore) {
+        rivalScore = s;
+        rival = pool[i];
+      }
+    }
+    if (rival && rival.bbox && best.bbox) {
+      const rc = boxCenterXY(rival.bbox);
+      if (
+        pointInBox(rc.x, rc.y, best.bbox) &&
+        boxArea(best.bbox) > boxArea(rival.bbox) * 1.25 &&
+        rivalScore >= bestScore * 0.55
+      ) {
+        best = rival;
+        bestScore = rivalScore;
+      }
     }
   }
 
@@ -1235,8 +1531,9 @@ export function stabilizeSubject(next, imgW, imgH, mode) {
 
   const prevArea = boxArea(trackedSubject.bbox);
   const nextArea = boxArea(next.bbox);
+  // 同主体缓动；拒绝突然胀成「并集大框」
   if (
-    nextArea > prevArea * 1.85 &&
+    nextArea > prevArea * 1.55 &&
     mostlyContains(next.bbox, trackedSubject.bbox)
   ) {
     return trackedSubject;
