@@ -2,7 +2,7 @@
 
 网页版 AI 相机：进页环境检测 → 全屏取景拍照；支持保存/分享。「添加到主屏幕」后可作为桌面 Web App 使用。开启 **辅助拍摄** 后，实时勾勒**单一主体**，并在风景模式下给出构图评级与移镜引导。
 
-**当前版本：`0.104`**（见 `version.json`；发版时同步改 `index.html` 内 `APP_VERSION` / `meta doyen-app-version`）
+**当前版本：`0.105`**（见 `version.json`；发版时同步改 `index.html` 内 `APP_VERSION` / `meta doyen-app-version`）
 
 在线使用：https://jon-hao.github.io/Doyen/
 
@@ -11,9 +11,9 @@
 - 环境检测：HTTPS、相机 API、辅助拍摄可用性
 - 全屏取景（JS cover，减少 iOS 黑边）、快门、前后摄像头
 - 风景 / 人像焦段预设（默认风景 · 广角）
-- **辅助拍摄**：本地轻量检测 + 轮廓分割 + 风景构图引导；首次约 13MB，可缓存后静默热启动
+- **辅助拍摄**：本地免费模型（不联网推理、不付费）+ 风景构图引导；首次下载后可缓存静默热启动
 - **桌面图标**：光圈负形 **D**（`icons/` + `manifest.webmanifest`）
-- **桌面版自动更新**：启动/回前台时拉取 `version.json`，不一致则清缓存并强制刷新
+- **桌面版自动更新**：启动/回前台拉取 `version.json`，不一致则清缓存并强制刷新
 - 拍照预览：全屏铺满 + 半透明「保存 / 取消」
 
 ## 发版
@@ -24,71 +24,65 @@
 
 ## 辅助拍摄
 
-### 引擎
+### 引擎（全部本地、免费）
 
 | 组件 | 体积 | 作用 |
 |------|------|------|
-| EfficientDet-Lite0 | ~6.9MB | 目标检测（降频） |
-| MagicTouch Interactive Segmenter | ~5.9MB | 交互式轮廓；跟踪帧升频 |
-| 构图评分（启发式，无额外模型） | — | 美学加权 + 移镜 / 换焦建议 |
+| **u2netp**（Apache-2.0） | ~4.4MB | **风景主路径**：显著性主体 |
+| **Selfie Segmenter**（MediaPipe） | ~0.24MB | **人像主路径**：人物分割 |
+| EfficientDet-Lite0 | ~6.9MB | 候选列表 / 主路径失败时回退 |
+| MagicTouch Interactive Segmenter | ~5.9MB | 轮廓修边与点击分割 |
+| 构图评分（启发式） | — | 美学加权 + 移镜 / 换焦 |
 
-### 稳定单体管线（`0.104`）
+首次合计约 **17–18MB**（另需 MediaPipe / onnxruntime-web 运行时，走 CDN，与现网一致）。无云端推理、无按次付费。
 
-面向「尽量接近原生 AI 相机」的 Web 方案（不依赖原生壳）：
+### 稳定单体管线
 
-1. **检测降频 + 跟踪升频** — 完整 OD 约每 280ms；中间帧只做分割跟踪，轮廓更跟手  
-2. **NMS + 并集大框剔除 + winner-takes-all** — 强制只框一个主体  
-3. **锁定独占** — 单击选定后不切换到其它主体，直到连续丢失后解锁  
-4. **软锁定迟滞** — 未点选时也避免因略高分跳到无关第二目标  
-5. **掩码单连通域 + EMA 平滑** — 去掉粘连第二人，减少轮廓闪烁  
-6. **丢失保持** — 短暂保持最后一框（holding），确认丢失后再提示点选  
+1. **模式分流定主** — 风景 u2netp / 人像 Selfie；失败才回退 EfficientDet  
+2. **检测降频 + 跟踪升频** — 显著性约 420ms；中间帧分割跟踪  
+3. **NMS + 并集框剔除 + 锁定独占** — 强制单主体  
+4. **掩码连通域 + EMA** — 去粘连、减闪烁  
+5. **丢失保持** — holding 后提示点选  
 
 ### 交互
 
-- **单击画面**：对焦框动画；能力允许时尝试硬件点按对焦（多为 Android Chrome；**iOS Safari 通常不可用**）；辅助开启时同时**选定主体**  
-- 不做单独「长按对焦」（与选主体拆开是多余操作）  
-- 切换焦距 / 镜头 / 风景·人像 / 横竖握：清空并强制重检  
-- 辅助开启时切换前后镜头会先关闭辅助再切换  
+- **单击**：对焦框动画；能力允许时尝试硬件点按对焦（多为 Android）；辅助开启时**选定主体**  
+- 不做单独长按对焦  
+- 切换焦距 / 镜头 / 模式 / 横竖握：强制重检  
 
 ### 风景构图引导
 
-算法参考：Liu 构图优化、Sensors 实时构图评分、EVA / AADB 美学权重。
-
-**软权重（合计 1.00）**：主体存在 0.16、反杂乱 0.14、放置 0.14、分离 0.12、明暗 0.10、平衡/尺寸各 0.08、色彩 0.07、完整度 0.06、水平 0.05。
-
-**硬门槛**：无主体封顶红档；非风景意图 ×0.45；多竞争主体 ×0.7。
-
-风景模式 UI：贴边色框（红/黄/绿）、四角移镜箭头、必要时换焦建议、加速度计水平提醒。
+权重与硬门槛同前（EVA/AADB + Liu）。风景模式：贴边色框、移镜箭头、换焦建议、水平提醒。
 
 ### 模式策略
 
-| 模式 | 框什么 | 选主体依据 |
-|------|--------|------------|
-| **风景** | 单一独立主体（不优先路人） | 降频 OD → 单体后处理 → 分割跟踪 |
-| **人像** | 只框一个人 | 同上；锁定后独占 |
+| 模式 | 定主模型 | 说明 |
+|------|----------|------|
+| **风景** | u2netp 显著性 | 最大显著连通域；点击可锁指定区域 |
+| **人像** | Selfie Segmenter | 人物掩码；OD 仅作回退 |
 
 ### 使用注意
 
 - 请用**后置镜头**
-- 推荐较新的移动 Safari / Chrome；首次需联网拉模型
-- Web 无法在 iPhone 上保证「选主体 = 光学合焦」；系统连续对焦仍由 Safari/系统控制
-
-### 与原生 AI 相机的差异（简要）
-
-浅影等原生 App 未公开模型细节；业界同类多依赖系统实例分割（如 Apple Vision）+ Neural Engine + 跨帧跟踪。Doyen 为 Web 可部署路线：EfficientDet-Lite + MagicTouch + 上述启发式稳定管线。中长期若要再逼近，可叠加显著性/实例分割模型（仍可不做原生壳）。
+- 推荐较新的移动 Safari / Chrome；首次需联网拉模型与 WASM 运行时  
+- iPhone 上「选主体」不保证光学合焦（Safari 无点按对焦 API）
 
 ## 本地文件
 
 | 路径 | 说明 |
 |------|------|
 | `version.json` | 线上版本号 |
-| `index.html` | 相机 UI、单击选主体/对焦、构图叠加层 |
-| `coach-engine.js` | 检测节流、锁定独占、掩码平滑、单体管线 |
-| `composition-coach.js` | 风景美学加权评分 |
-| `manifest.webmanifest` | PWA 名称与图标 |
-| `icons/` | 正式图标；`icons/concepts/` 本地概念稿不入库 |
-| `models/*.tflite` | 检测与分割模型 |
+| `index.html` | 相机 UI |
+| `coach-engine.js` | 加载/调度/锁定/跟踪 |
+| `saliency-local.js` | Selfie + u2netp 本地推理 |
+| `composition-coach.js` | 风景美学评分 |
+| `manifest.webmanifest` / `icons/` | PWA 图标 |
+| `models/efficientdet_lite0.tflite` | 目标检测 |
+| `models/magic_touch.tflite` | 交互分割 |
+| `models/selfie_segmenter.tflite` | 人像分割 |
+| `models/u2netp.onnx` | 风景显著性 |
 
 ## License
 
-本项目为专有软件，**未开源**。详见 [LICENSE](./LICENSE)。
+本项目为专有软件，**未开源**。详见 [LICENSE](./LICENSE)。  
+第三方模型：MediaPipe Selfie Segmenter；U²-Net portable（u2netp，Apache-2.0）。运行时：MediaPipe Tasks Vision、ONNX Runtime Web（MIT）。

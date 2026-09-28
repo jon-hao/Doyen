@@ -1,19 +1,32 @@
 /**
  * 轻量主体检测 + 轮廓分割
- * - EfficientDet-Lite0：选主体 / 跟踪
- * - MagicTouch Interactive Segmenter：精确轮廓
+ * - EfficientDet-Lite0：候选 / 备用
+ * - MagicTouch：交互轮廓修边
+ * - Selfie Segmenter：人像主路径（本地免费）
+ * - u2netp：风景显著性主路径（本地免费）
  */
 import {
   ObjectDetector,
   InteractiveSegmenter,
   FilesetResolver,
 } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/+esm";
+import {
+  initSaliencyLocal,
+  closeSaliencyLocal,
+  hasSelfieSegmenter,
+  hasU2Net,
+  runSelfieMask,
+  runU2NetMask,
+  primaryFromMask,
+} from "./saliency-local.js";
 
-const READY_KEY = "doyen_model_ready_v2";
-const MODEL_ID = "mediapipe/efficientdet_lite0_float16";
+const READY_KEY = "doyen_model_ready_v3";
+const MODEL_ID = "mediapipe/efficientdet_lite0_float16+selfie+u2netp";
 const OD_BYTES = 7244197;
 const SEG_BYTES = 6227884;
-const MODEL_BYTES = OD_BYTES + SEG_BYTES;
+const SELFIE_BYTES = 249537;
+const U2NET_BYTES = 4574861;
+const MODEL_BYTES = OD_BYTES + SEG_BYTES + SELFIE_BYTES + U2NET_BYTES;
 const MP_VERSION = "0.10.18";
 const WASM_CDN =
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@" + MP_VERSION + "/wasm";
@@ -36,8 +49,9 @@ let subjectMode = "landscape";
 /** @type {"landscape" | "portrait"} 手机横握/竖握 */
 let holdOrientation = "portrait";
 
-/** 检测降频：完整 OD 间隔；中间帧只做分割跟踪 */
+/** 检测降频：完整 OD/显著性间隔；中间帧只做分割跟踪 */
 const DETECT_INTERVAL_MS = 280;
+const DETECT_INTERVAL_U2_MS = 420;
 /** 丢失后短暂保持最后一框的帧数 */
 const TRACK_HOLD_FRAMES = 10;
 const PIN_HOLD_FRAMES = 14;
@@ -50,6 +64,8 @@ let lastObjects = [];
 let smoothMask = null;
 /** @type {"searching"|"locked"|"holding"|"lost"} */
 let lockState = "searching";
+/** @type {null|{width:number,height:number,data:Uint8Array,soft?:Float32Array}} */
+let lastSaliencyMask = null;
 
 export function getAssistLockState() {
   return {
@@ -75,6 +91,7 @@ export async function setSubjectMode(mode) {
   lastObjects = [];
   smoothMask = null;
   lockState = "searching";
+  lastSaliencyMask = null;
   if (!detector || typeof detector.setOptions !== "function") return subjectMode;
   try {
     if (subjectMode === "portrait") {
@@ -127,7 +144,13 @@ async function fetchWithProgress(url, onProgress, label, rangeStart, rangeEnd) {
   const end = typeof rangeEnd === "number" ? rangeEnd : 1;
   const span = Math.max(0.01, end - start);
   const fileTotal =
-    label === "magic_touch.tflite" ? SEG_BYTES : OD_BYTES;
+    label === "magic_touch.tflite"
+      ? SEG_BYTES
+      : label === "selfie_segmenter.tflite"
+        ? SELFIE_BYTES
+        : label === "u2netp.onnx"
+          ? U2NET_BYTES
+          : OD_BYTES;
 
   function report(loadedPart, totalPart) {
     const ratio = totalPart > 0 ? loadedPart / totalPart : 1;
@@ -194,13 +217,26 @@ async function fetchModelBuffer(onProgress) {
   return fetchNamedModelBuffer(
     "efficientdet_lite0.tflite",
     onProgress,
-    0.12,
-    0.55
+    0.1,
+    0.4
   );
 }
 
 async function fetchSegmenterBuffer(onProgress) {
-  return fetchNamedModelBuffer("magic_touch.tflite", onProgress, 0.55, 0.92);
+  return fetchNamedModelBuffer("magic_touch.tflite", onProgress, 0.42, 0.62);
+}
+
+async function fetchSelfieBuffer(onProgress) {
+  return fetchNamedModelBuffer(
+    "selfie_segmenter.tflite",
+    onProgress,
+    0.62,
+    0.72
+  );
+}
+
+async function fetchU2NetBuffer(onProgress) {
+  return fetchNamedModelBuffer("u2netp.onnx", onProgress, 0.72, 0.95);
 }
 
 function markModelReady() {
@@ -284,6 +320,7 @@ export function resetCoachRuntime() {
   try {
     if (segmenter && typeof segmenter.close === "function") segmenter.close();
   } catch (_) {}
+  closeSaliencyLocal();
   detector = null;
   segmenter = null;
   warmed = false;
@@ -299,6 +336,7 @@ export function resetCoachRuntime() {
   lastObjects = [];
   smoothMask = null;
   lockState = "searching";
+  lastSaliencyMask = null;
 }
 export function getCoachDevice() {
   return deviceUsed;
@@ -386,10 +424,50 @@ async function createDetector(onProgress) {
     segmenter = null;
   }
 
+  // 二期：本地 Selfie + u2netp（失败不阻断）
+  let selfieBuf = null;
+  let u2Buf = null;
+  try {
+    notify(onProgress, {
+      status: "initiate",
+      file: "selfie_segmenter.tflite",
+      total: SELFIE_BYTES,
+    });
+    selfieBuf = await fetchSelfieBuffer(onProgress);
+    notify(onProgress, {
+      status: "done",
+      file: "selfie_segmenter.tflite",
+      loaded: SELFIE_BYTES,
+      total: SELFIE_BYTES,
+    });
+  } catch (_) {
+    selfieBuf = null;
+  }
+  try {
+    notify(onProgress, {
+      status: "initiate",
+      file: "u2netp.onnx",
+      total: U2NET_BYTES,
+    });
+    u2Buf = await fetchU2NetBuffer(onProgress);
+    notify(onProgress, {
+      status: "done",
+      file: "u2netp.onnx",
+      loaded: U2NET_BYTES,
+      total: U2NET_BYTES,
+    });
+  } catch (_) {
+    u2Buf = null;
+  }
+  try {
+    await initSaliencyLocal(vision, selfieBuf, u2Buf, onProgress);
+  } catch (_) {}
+
   videoTs = 0;
   trackedSubject = null;
   pinnedSubject = null;
-  emitResourceProgress(onProgress, 0.99, "magic_touch.tflite", SEG_BYTES);
+  lastSaliencyMask = null;
+  emitResourceProgress(onProgress, 0.99, "u2netp.onnx", U2NET_BYTES);
   return created;
 }
 
@@ -1222,15 +1300,73 @@ export async function detectSubjects(source, onProgress, options) {
   const canvas = canvasFromSource(source);
   const now = Date.now();
   const forceDetect = !!(options && options.forceDetect);
+  const detectGap =
+    mode === "landscape" && hasU2Net()
+      ? DETECT_INTERVAL_U2_MS
+      : DETECT_INTERVAL_MS;
   const needDetect =
     forceDetect ||
     !lastDetectAt ||
-    now - lastDetectAt >= DETECT_INTERVAL_MS ||
+    now - lastDetectAt >= detectGap ||
     (!trackedSubject && !pinnedSubject);
 
   let objects = lastObjects;
+  let primaryRaw = null;
+  let mask = null;
+  const pinSeed =
+    pinnedSubject && typeof pinnedSubject.nx === "number"
+      ? { nx: pinnedSubject.nx, ny: pinnedSubject.ny }
+      : null;
+
   if (needDetect) {
     videoTs += 33;
+    lastDetectAt = now;
+
+    // —— 主路径：人像 Selfie / 风景 u2netp ——
+    if (mode === "portrait" && hasSelfieSegmenter()) {
+      const selfie = runSelfieMask(canvas, videoTs);
+      if (selfie) {
+        const hit = primaryFromMask(
+          selfie,
+          canvas.width,
+          canvas.height,
+          "person",
+          pinSeed
+        );
+        if (hit) {
+          primaryRaw = {
+            label: hit.label,
+            score: hit.score,
+            bbox: hit.bbox.slice(),
+          };
+          mask = hit.mask;
+        }
+      }
+    } else if (mode === "landscape" && hasU2Net()) {
+      try {
+        const u2 = await runU2NetMask(canvas);
+        if (u2) {
+          lastSaliencyMask = u2;
+          const hit = primaryFromMask(
+            u2,
+            canvas.width,
+            canvas.height,
+            "subject",
+            pinSeed
+          );
+          if (hit) {
+            primaryRaw = {
+              label: hit.label,
+              score: hit.score,
+              bbox: hit.bbox.slice(),
+            };
+            mask = hit.mask;
+          }
+        }
+      } catch (_) {}
+    }
+
+    // OD：列表供构图杂乱/点击候选；主路径失败时回退选主
     let result;
     try {
       result = detector.detectForVideo(canvas, videoTs);
@@ -1244,18 +1380,22 @@ export async function detectSubjects(source, onProgress, options) {
       });
     }
     lastObjects = objects;
-    lastDetectAt = now;
-  }
 
-  let primaryRaw = null;
-  if (needDetect) {
-    primaryRaw = pickPrimarySubject(
-      objects,
-      canvas.width,
-      canvas.height,
-      mode,
-      canvas
-    );
+    if (!primaryRaw) {
+      primaryRaw = pickPrimarySubject(
+        objects,
+        canvas.width,
+        canvas.height,
+        mode,
+        canvas
+      );
+    } else if (pinnedSubject && primaryRaw.bbox) {
+      // 显著性命中时同步 pin 框
+      pinMissStreak = 0;
+      pinnedSubject.bbox = primaryRaw.bbox.slice();
+      pinnedSubject.label = primaryRaw.label;
+      pinnedSubject.score = primaryRaw.score;
+    }
   } else if (pinnedSubject && pinnedSubject.bbox) {
     primaryRaw = {
       label: pinnedSubject.label,
@@ -1272,11 +1412,36 @@ export async function detectSubjects(source, onProgress, options) {
 
   let primary = stabilizeSubject(primaryRaw, canvas.width, canvas.height, mode);
 
-  // 跟踪帧：用分割收紧框，不重跑 OD
-  let mask = null;
+  // 跟踪帧或主路径未出 mask：MagicTouch 修边
   if (primary && primary.bbox) {
     const seed = seedFromSubject(primary, canvas.width, canvas.height);
-    mask = segmentSubjectMask(canvas, seed.nx, seed.ny);
+    if (!mask) {
+      // 风景跟踪帧可复用上次显著性连通域（若种子仍落在内）
+      if (
+        mode === "landscape" &&
+        lastSaliencyMask &&
+        !needDetect
+      ) {
+        const hit = primaryFromMask(
+          lastSaliencyMask,
+          canvas.width,
+          canvas.height,
+          "subject",
+          seed
+        );
+        if (hit && boxIoU(hit.bbox, primary.bbox) >= 0.15) {
+          mask = hit.mask;
+          primary = {
+            label: primary.label,
+            score: Math.max(primary.score, hit.score),
+            bbox: hit.bbox.slice(),
+          };
+        }
+      }
+      if (!mask) {
+        mask = segmentSubjectMask(canvas, seed.nx, seed.ny);
+      }
+    }
     if (mask) {
       const refined = finalizeSingleSubjectMask(
         mask,
@@ -1321,7 +1486,8 @@ export async function detectSubjects(source, onProgress, options) {
   } else if (trackMissStreak > 0 && trackedSubject) {
     lockState = "holding";
   } else if (!primary) {
-    lockState = lockState === "locked" || lockState === "holding" ? "lost" : "searching";
+    lockState =
+      lockState === "locked" || lockState === "holding" ? "lost" : "searching";
   } else {
     lockState = "locked";
   }
@@ -1335,6 +1501,10 @@ export async function detectSubjects(source, onProgress, options) {
     device: deviceUsed,
     lockState: lockState,
     didDetect: needDetect,
+    engines: {
+      selfie: hasSelfieSegmenter(),
+      u2net: hasU2Net(),
+    },
   };
 }
 
@@ -1343,8 +1513,49 @@ export async function detectSubjects(source, onProgress, options) {
  * @returns {object|null} 锁定的主体
  */
 export function pinSubjectAt(objects, x, y, imgW, imgH, mode) {
-  const list = objects || [];
+  const w = Math.max(1, imgW || 1);
+  const h = Math.max(1, imgH || 1);
+  const nx = x / w;
+  const ny = y / h;
   const m = mode === "portrait" ? "portrait" : "landscape";
+
+  // 优先：显著性 / Selfie 掩码上点选连通域
+  if (m === "landscape" && lastSaliencyMask) {
+    const hit = primaryFromMask(lastSaliencyMask, w, h, "subject", {
+      nx: nx,
+      ny: ny,
+    });
+    if (hit && hit.bbox) {
+      // 点是否靠近该连通域
+      const c = boxCenterXY(hit.bbox);
+      const dist =
+        Math.sqrt((c.x - x) * (c.x - x) + (c.y - y) * (c.y - y)) /
+        Math.min(w, h);
+      const inside = pointInBox(x, y, hit.bbox);
+      if (inside || dist < 0.22) {
+        pinnedSubject = {
+          label: hit.label,
+          score: hit.score,
+          bbox: hit.bbox.slice(),
+          nx: nx,
+          ny: ny,
+        };
+        pinMissStreak = 0;
+        trackedSubject = {
+          label: hit.label,
+          score: hit.score,
+          bbox: hit.bbox.slice(),
+        };
+        trackMissStreak = 0;
+        smoothMask = null;
+        lockState = "locked";
+        lastDetectAt = 0;
+        return pinnedSubject;
+      }
+    }
+  }
+
+  const list = objects || [];
   let pool = list;
   if (m === "portrait") {
     pool = list.filter(function (o) {
@@ -1353,12 +1564,32 @@ export function pinSubjectAt(objects, x, y, imgW, imgH, mode) {
   }
   pool = prepareSingleSubjectPool(pool);
   if (!pool.length) {
-    pinnedSubject = null;
-    return null;
+    // 无 OD 候选时：仍可用点击坐标作为 pin 种子，下一帧强制显著性重检
+    pinnedSubject = {
+      label: m === "portrait" ? "person" : "subject",
+      score: 0.5,
+      bbox: [
+        Math.max(0, x - w * 0.12),
+        Math.max(0, y - h * 0.12),
+        Math.min(w, x + w * 0.12),
+        Math.min(h, y + h * 0.12),
+      ],
+      nx: nx,
+      ny: ny,
+    };
+    pinMissStreak = 0;
+    trackedSubject = {
+      label: pinnedSubject.label,
+      score: pinnedSubject.score,
+      bbox: pinnedSubject.bbox.slice(),
+    };
+    trackMissStreak = 0;
+    smoothMask = null;
+    lockState = "locked";
+    lastDetectAt = 0;
+    return pinnedSubject;
   }
 
-  const w = Math.max(1, imgW || 1);
-  const h = Math.max(1, imgH || 1);
   const radius = Math.min(w, h) * 0.16;
   let best = null;
   let bestRank = Infinity;
@@ -1391,16 +1622,37 @@ export function pinSubjectAt(objects, x, y, imgW, imgH, mode) {
   }
 
   if (!best) {
-    pinnedSubject = null;
-    return null;
+    pinnedSubject = {
+      label: m === "portrait" ? "person" : "subject",
+      score: 0.5,
+      bbox: [
+        Math.max(0, x - w * 0.12),
+        Math.max(0, y - h * 0.12),
+        Math.min(w, x + w * 0.12),
+        Math.min(h, y + h * 0.12),
+      ],
+      nx: nx,
+      ny: ny,
+    };
+    pinMissStreak = 0;
+    trackedSubject = {
+      label: pinnedSubject.label,
+      score: pinnedSubject.score,
+      bbox: pinnedSubject.bbox.slice(),
+    };
+    trackMissStreak = 0;
+    smoothMask = null;
+    lockState = "locked";
+    lastDetectAt = 0;
+    return pinnedSubject;
   }
 
   pinnedSubject = {
     label: best.label,
     score: best.score,
     bbox: best.bbox.slice(),
-    nx: x / w,
-    ny: y / h,
+    nx: nx,
+    ny: ny,
   };
   pinMissStreak = 0;
   trackedSubject = {
@@ -1411,7 +1663,7 @@ export function pinSubjectAt(objects, x, y, imgW, imgH, mode) {
   trackMissStreak = 0;
   smoothMask = null;
   lockState = "locked";
-  lastDetectAt = 0; // 下一帧强制重检以对齐锁定体
+  lastDetectAt = 0;
   return pinnedSubject;
 }
 
@@ -1785,4 +2037,5 @@ export function clearTrackedSubject() {
   lastObjects = [];
   smoothMask = null;
   lockState = "searching";
+  lastSaliencyMask = null;
 }
