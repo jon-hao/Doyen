@@ -837,7 +837,7 @@
   <script>
     (function () {
       /** 与 version.json 同步；发版时两处一起改 */
-      const APP_VERSION = "0.100";
+      const APP_VERSION = "0.101";
       const VERSION_RELOAD_KEY = "doyen_reload_for";
 
       async function checkAppVersionAndUpdate() {
@@ -2227,22 +2227,27 @@
         }
       }
 
-      function updateCompositionGuide(subject, srcW, srcH) {
+      function updateCompositionGuide(subject, srcW, srcH, extras) {
         if (!compGuide || !coachActive || shootMode !== "landscape") {
           hideCompositionGuide();
           return;
         }
-        if (!subject || !subject.bbox || !compositionCoach) {
+        if (!compositionCoach) {
           hideCompositionGuide();
           return;
         }
+        const ex = extras || {};
         const guide = compositionCoach.evaluateLandscapeComposition(
-          subject,
+          subject || null,
           srcW,
           srcH,
           {
             currentZoom: zoomFactor,
             focals: MODE_PRESETS.landscape.focals,
+            canvas: ex.canvas || null,
+            objects: ex.objects || [],
+            tiltDeg: motionTiltDeg,
+            hasTilt: motionListening,
           }
         );
         if (!guide) {
@@ -2940,19 +2945,21 @@
             lastTapSize = { w: snap.srcW, h: snap.srcH };
             if (subject && subject.bbox) {
               drawSubjectContour(lastMask, subject.bbox, snap.srcW, snap.srcH);
-              if (modeNow === "landscape") {
-                if (!compositionCoach) {
-                  try {
-                    await ensureCompositionCoach();
-                  } catch (_) {}
-                }
-                updateCompositionGuide(subject, snap.srcW, snap.srcH);
-              } else {
-                hideCompositionGuide();
-              }
             } else {
               lastMask = null;
               clearSubjectOverlay();
+            }
+            if (modeNow === "landscape") {
+              if (!compositionCoach) {
+                try {
+                  await ensureCompositionCoach();
+                } catch (_) {}
+              }
+              updateCompositionGuide(subject, snap.srcW, snap.srcH, {
+                canvas: snap.canvas,
+                objects: vision.objects || [],
+              });
+            } else {
               hideCompositionGuide();
             }
           } catch (_) {
@@ -3080,7 +3087,10 @@
               snap.srcH
             );
             if (shootMode === "landscape") {
-              updateCompositionGuide(pinned, snap.srcW, snap.srcH);
+              updateCompositionGuide(pinned, snap.srcW, snap.srcH, {
+                canvas: snap.canvas,
+                objects: objects,
+              });
             }
             // 软刷新跟踪，但不硬清 pin
             coachReanalyzeSoon = true;
