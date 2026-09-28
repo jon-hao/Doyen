@@ -3,8 +3,63 @@
  * 依据：
  * - Liu et al. Optimizing Photo Composition（三分法 / 视觉平衡 / 尺寸甜区）
  * - Sensors 2020 Photo Composition with Real-Time Rating（主体重心距三分点）
- * - 实时相机引导：把主体移向最优兴趣点，并建议变焦（ACM MM 2024 类 view adjustment）
+ * - EVA / AADB 美学属性相对重要性（composition+depth > light+color > quality）
+ * - 实时相机引导：移镜 / 变焦建议
+ *
+ * 权重定稿（合计 1.00），来源摘要：
+ * - EVA：观察者自评中 composition&depth 影响最大，light&color 略次，quality/semantic 再次
+ * - AADB+XAI：interesting content / object emphasis 与构图类属性对总分贡献靠前
+ * - Liu：placement + size + balance 为可计算构图核心
+ * - 实拍问题（白墙/杂乱桌/马桶拿绿）：提高「主体存在 + 分离 + 反杂乱」权重，压低纯几何构图
  */
+
+/**
+ * 美学评分权重（定稿）。实现新 skill 时按此加权；未实现的项暂不计入总分。
+ * @type {Readonly<{
+ *   subjectPresence:number,
+ *   separation:number,
+ *   antiClutter:number,
+ *   placement:number,
+ *   balance:number,
+ *   size:number,
+ *   completeness:number,
+ *   tone:number,
+ *   color:number,
+ *   level:number
+ * }>}
+ */
+export const AESTHETIC_WEIGHTS = Object.freeze({
+  /** 清晰可辨主体（无主体/空墙应接近 0）— 对应 semantic / interesting content */
+  subjectPresence: 0.16,
+  /** 主体与背景分离（对比/显著性）— object emphasis */
+  separation: 0.12,
+  /** 画面干净度（杂乱/多竞争体越低）— 构图组织失败的主要惩罚项 */
+  antiClutter: 0.14,
+  /** 三分法 / 中心构图放置 — composition 核心 */
+  placement: 0.14,
+  /** 视觉平衡 — Liu / Gestalt balance */
+  balance: 0.08,
+  /** 主体尺寸甜区 — Liu size region */
+  size: 0.08,
+  /** 主体完整度（少裁切） */
+  completeness: 0.06,
+  /** 明暗层次 / 曝光不过死 — light */
+  tone: 0.10,
+  /** 色彩丰富度与和谐 — color */
+  color: 0.07,
+  /** 画面水平 — quality / stability */
+  level: 0.05,
+});
+
+/** 硬门槛（不占软权重，直接封顶或乘子） */
+export const AESTHETIC_GATES = Object.freeze({
+  /** 无有效主体时总分上限（红档） */
+  noSubjectScoreCap: 0.4,
+  /** 风景模式「非风景意图」类别（马桶/洗手池等）乘子 */
+  nonScenicMultiplier: 0.45,
+  /** 单一焦点：次主体面积接近主角时的乘子下限 */
+  multiSubjectMultiplier: 0.7,
+});
 
 /**
  * @typedef {{bbox:number[], score?:number, label?:string}} SubjectBox
@@ -121,10 +176,20 @@ function nearestPowerPoint(nx, ny) {
   return { x: best[0], y: best[1] };
 }
 
+/**
+ * 当前已实现子项按定稿权重归一化加权。
+ * 未实现项（分离/杂乱/光色/水平）待 skill 落地后再并入。
+ */
 function composeScore(placement, size, completeness, balance) {
-  return clamp01(
-    placement * 0.48 + size * 0.28 + completeness * 0.16 + balance * 0.08
-  );
+  const w = AESTHETIC_WEIGHTS;
+  const active =
+    w.placement + w.size + w.completeness + w.balance;
+  const raw =
+    placement * w.placement +
+    size * w.size +
+    completeness * w.completeness +
+    balance * w.balance;
+  return clamp01(raw / active);
 }
 
 /** 仅靠移镜能达到的上限分（placement 满分） */
