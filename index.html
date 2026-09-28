@@ -9,6 +9,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="doyen-app-version" content="0.100" />
   <title>Doyen Camera</title>
   <style>
     :root {
@@ -835,6 +836,51 @@
 
   <script>
     (function () {
+      /** 与 version.json 同步；发版时两处一起改 */
+      const APP_VERSION = "0.100";
+      const VERSION_RELOAD_KEY = "doyen_reload_for";
+
+      async function checkAppVersionAndUpdate() {
+        try {
+          const base = (function () {
+            const pathName = location.pathname || "/";
+            if (pathName.endsWith("/")) return pathName;
+            if (/\.html?$/i.test(pathName)) return pathName.replace(/[^/]+$/, "");
+            return pathName.replace(/\/?$/, "/");
+          })();
+          const res = await fetch(
+            base + "version.json?_=" + Date.now(),
+            { cache: "no-store" }
+          );
+          if (!res.ok) return;
+          const data = await res.json();
+          const remote = String((data && data.version) || "").trim();
+          if (!remote || remote === APP_VERSION) {
+            if (sessionStorage.getItem(VERSION_RELOAD_KEY) === APP_VERSION) {
+              sessionStorage.removeItem(VERSION_RELOAD_KEY);
+            }
+            return;
+          }
+          // 已为该远程版本尝试过强刷，避免死循环
+          if (sessionStorage.getItem(VERSION_RELOAD_KEY) === remote) return;
+          sessionStorage.setItem(VERSION_RELOAD_KEY, remote);
+          try {
+            if (typeof caches !== "undefined" && caches.keys) {
+              const keys = await caches.keys();
+              await Promise.all(
+                keys.map(function (k) {
+                  return caches.delete(k);
+                })
+              );
+            }
+          } catch (_) {}
+          const url = new URL(location.href);
+          url.searchParams.set("_appv", remote);
+          url.searchParams.set("_t", String(Date.now()));
+          location.replace(url.href);
+        } catch (_) {}
+      }
+
       const video = document.getElementById("preview");
       const canvas = document.getElementById("shot");
       const shutter = document.getElementById("shutter");
@@ -1990,7 +2036,8 @@
           base = pathName + "/" + fileName;
         }
         // 同域优先；jsDelivr 作备用（Pages 延迟时）
-        return base + "?v=20260928-level1";
+        // 同域优先；用 APP_VERSION 做缓存戳，桌面版随版本更新
+        return base + "?v=" + encodeURIComponent(APP_VERSION);
       }
 
       /** 已成功加载过：静默热启动，不闪「下载资源」 */
@@ -2143,7 +2190,8 @@
           return coachEngine;
         } catch (_) {
           coachEngine = await import(
-            "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/coach-engine.js?v=20260928-level1"
+            "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/coach-engine.js?v=" +
+              encodeURIComponent(APP_VERSION)
           );
           return coachEngine;
         }
@@ -2156,7 +2204,8 @@
           return compositionCoach;
         } catch (_) {
           compositionCoach = await import(
-            "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/composition-coach.js?v=20260928-level1"
+            "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/composition-coach.js?v=" +
+              encodeURIComponent(APP_VERSION)
           );
           return compositionCoach;
         }
@@ -3134,13 +3183,14 @@
       document.addEventListener("visibilitychange", function () {
         if (!document.hidden) {
           resumePreview();
-          // 不再自动续传：闪退后半成品 + 自动开下会再次 OOM，形成刷新死循环
+          checkAppVersionAndUpdate();
         } else if (coachEngine && coachEngine.flushActiveDownloads) {
           coachEngine.flushActiveDownloads().catch(function () {});
         }
       });
       window.addEventListener("pageshow", function () {
         resumePreview();
+        checkAppVersionAndUpdate();
       });
       window.addEventListener("pagehide", function () {
         if (coachEngine && coachEngine.flushActiveDownloads) {
@@ -3167,8 +3217,10 @@
         window.visualViewport.addEventListener("resize", scheduleLayoutVideos);
       }
 
-      // 先进检测页，再进入拍摄
-      runDeviceProbe();
+      // 先进检测页，再进入拍摄；同时校验线上版本（桌面 Web App 强刷）
+      checkAppVersionAndUpdate().finally(function () {
+        runDeviceProbe();
+      });
     })();
   </script>
 </body>
