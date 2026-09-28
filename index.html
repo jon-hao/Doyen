@@ -13,7 +13,7 @@
   <meta name="apple-mobile-web-app-title" content="Doyen" />
   <meta name="application-name" content="Doyen" />
   <meta name="theme-color" content="#1a1a1a" />
-  <meta name="doyen-app-version" content="0.105" />
+  <meta name="doyen-app-version" content="0.106" />
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
   <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png" />
@@ -503,6 +503,64 @@
       text-align: center;
     }
 
+    #autoRescanBtn {
+      margin: 4px 0 0;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: rgba(255, 255, 255, 0.42);
+      font-size: 9px;
+      line-height: 1.2;
+      letter-spacing: 0.02em;
+      cursor: pointer;
+      display: none;
+    }
+    #autoRescanBtn.show {
+      display: block;
+    }
+    #autoRescanBtn.on {
+      color: rgba(74, 222, 128, 0.75);
+    }
+
+    /* 锁定态角标：取景顶部居中，不挡构图框 */
+    #lockBadge {
+      position: absolute;
+      top: calc(12px + var(--safe-top));
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 5;
+      pointer-events: none;
+      padding: 5px 12px;
+      border-radius: 999px;
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      color: rgba(255, 255, 255, 0.92);
+      background: rgba(0, 0, 0, 0.42);
+      border: 1px solid rgba(74, 222, 128, 0.35);
+      opacity: 0;
+      transition: opacity 0.2s ease;
+      white-space: nowrap;
+    }
+    #lockBadge.show {
+      opacity: 1;
+    }
+    #lockBadge[data-state="locked"] {
+      border-color: rgba(74, 222, 128, 0.55);
+      color: #bbf7d0;
+    }
+    #lockBadge[data-state="holding"] {
+      border-color: rgba(250, 204, 21, 0.45);
+      color: #fde68a;
+    }
+    #lockBadge[data-state="searching"] {
+      border-color: rgba(255, 255, 255, 0.22);
+      color: rgba(255, 255, 255, 0.7);
+    }
+    #lockBadge[data-state="lost"] {
+      border-color: rgba(239, 68, 68, 0.45);
+      color: #fecaca;
+    }
+
     #subjectOverlay {
       position: absolute;
       inset: 0;
@@ -793,6 +851,7 @@
         <div id="compFocalHint"></div>
       </div>
       <div id="levelHint" aria-hidden="true">请调整手机角度，保持画面水平</div>
+      <div id="lockBadge" aria-hidden="true"></div>
     </div>
     <div id="review" aria-hidden="true">
       <img id="reviewImg" alt="预览" />
@@ -820,6 +879,7 @@
           <div id="coachSlot">
             <button id="coachBtn" type="button" aria-label="辅助拍摄" disabled>辅助拍摄</button>
             <p id="coachHint"></p>
+            <button id="autoRescanBtn" type="button" aria-pressed="true">自动重搜 · 开</button>
           </div>
           <button id="shutter" type="button" aria-label="拍照" disabled></button>
           <button id="flipBtn" type="button" aria-label="切换摄像头" disabled>⟲</button>
@@ -845,7 +905,7 @@
   <script>
     (function () {
       /** 与 version.json 同步；发版时两处一起改 */
-      const APP_VERSION = "0.105";
+      const APP_VERSION = "0.106";
       const VERSION_RELOAD_KEY = "doyen_reload_for";
 
       async function checkAppVersionAndUpdate() {
@@ -895,6 +955,8 @@
       const flipBtn = document.getElementById("flipBtn");
       const coachBtn = document.getElementById("coachBtn");
       const coachHint = document.getElementById("coachHint");
+      const autoRescanBtn = document.getElementById("autoRescanBtn");
+      const lockBadge = document.getElementById("lockBadge");
       const subjectOverlay = document.getElementById("subjectOverlay");
       const tapFocus = document.getElementById("tapFocus");
       const compGuide = document.getElementById("compGuide");
@@ -2055,6 +2117,54 @@
         if (coachHint) coachHint.textContent = text || "";
       }
 
+      const AUTO_RESCAN_KEY = "doyen_auto_rescan";
+      let autoRescanOn = true;
+      try {
+        const saved = localStorage.getItem(AUTO_RESCAN_KEY);
+        if (saved === "0") autoRescanOn = false;
+        if (saved === "1") autoRescanOn = true;
+      } catch (_) {}
+
+      function syncAutoRescanBtn() {
+        if (!autoRescanBtn) return;
+        autoRescanBtn.textContent = autoRescanOn
+          ? "自动重搜 · 开"
+          : "自动重搜 · 关";
+        autoRescanBtn.classList.toggle("on", autoRescanOn);
+        autoRescanBtn.setAttribute("aria-pressed", autoRescanOn ? "true" : "false");
+      }
+
+      function setAutoRescanVisible(show) {
+        if (!autoRescanBtn) return;
+        autoRescanBtn.classList.toggle("show", !!show);
+        syncAutoRescanBtn();
+      }
+
+      function setLockBadge(state, pinned) {
+        if (!lockBadge) return;
+        const map = {
+          locked: pinned ? "已锁定主体" : "跟踪主体中",
+          holding: "保持中…",
+          searching: "寻找主体",
+          lost: autoRescanOn ? "丢失 · 即将重搜" : "主体已丢失",
+        };
+        if (!state || !map[state]) {
+          lockBadge.classList.remove("show");
+          lockBadge.textContent = "";
+          lockBadge.removeAttribute("data-state");
+          lockBadge.setAttribute("aria-hidden", "true");
+          return;
+        }
+        lockBadge.dataset.state = state;
+        lockBadge.textContent = map[state];
+        lockBadge.classList.add("show");
+        lockBadge.setAttribute("aria-hidden", "false");
+      }
+
+      function hideLockBadge() {
+        setLockBadge(null);
+      }
+
       function setCoachBtnProgress(pct) {
         const p = Math.max(0, Math.min(100, Number(pct) || 0));
         coachBtn.style.setProperty("--coach-progress", p.toFixed(1) + "%");
@@ -2738,13 +2848,32 @@
         stableMaskHold = 0;
       }
 
-      function drawSubjectContour(mask, bbox, srcW, srcH) {
+      function drawSubjectContour(mask, bbox, srcW, srcH, lockVisual) {
         sizeSubjectOverlay();
         const ctx = subjectOverlay.getContext("2d");
         if (!ctx) return;
         const ow = subjectOverlay.width;
         const oh = subjectOverlay.height;
         ctx.clearRect(0, 0, ow, oh);
+
+        const visual = lockVisual || "locked";
+        let stroke = "rgba(74, 222, 128, 0.92)";
+        let fillA = 52;
+        let lineW = Math.max(2.5, Math.round(ow / 150));
+        let dashed = false;
+        if (visual === "holding") {
+          stroke = "rgba(250, 204, 21, 0.78)";
+          fillA = 28;
+          lineW = Math.max(2, Math.round(ow / 170));
+          dashed = true;
+        } else if (visual === "searching") {
+          stroke = "rgba(74, 222, 128, 0.7)";
+          fillA = 40;
+        } else if (visual === "locked") {
+          stroke = "rgba(74, 222, 128, 0.98)";
+          fillA = 58;
+          lineW = Math.max(2.8, Math.round(ow / 140));
+        }
 
         const scale = Math.max(ow / srcW, oh / srcH);
         const dw = srcW * scale;
@@ -2766,7 +2895,6 @@
           const sy = dh / mh;
           const src = useMask.data;
 
-          // 半透明填充
           const img = ctx.createImageData(mw, mh);
           const px = img.data;
           let onCount = 0;
@@ -2774,13 +2902,18 @@
             const o = i * 4;
             if (src[i] > 0) {
               onCount += 1;
-              px[o] = 74;
-              px[o + 1] = 222;
-              px[o + 2] = 128;
-              px[o + 3] = 52;
+              if (visual === "holding") {
+                px[o] = 250;
+                px[o + 1] = 204;
+                px[o + 2] = 21;
+              } else {
+                px[o] = 74;
+                px[o + 1] = 222;
+                px[o + 2] = 128;
+              }
+              px[o + 3] = fillA;
             }
           }
-          // 掩码异常（几乎全空）时退回 bbox，避免绿点
           if (onCount < 24) {
             // fall through to bbox
           } else {
@@ -2792,12 +2925,12 @@
             ctx.imageSmoothingEnabled = true;
             ctx.drawImage(tmp, ox, oy, dw, dh);
 
-            // 边缘相邻像素连线 → 连续丝滑描边
             ctx.beginPath();
-            ctx.strokeStyle = "rgba(74, 222, 128, 0.92)";
-            ctx.lineWidth = Math.max(2.5, Math.round(ow / 150));
+            ctx.strokeStyle = stroke;
+            ctx.lineWidth = lineW;
             ctx.lineJoin = "round";
             ctx.lineCap = "round";
+            if (dashed) ctx.setLineDash([6, 5]);
             for (let y = 0; y < mh; y++) {
               for (let x = 0; x < mw; x++) {
                 if (!isMaskEdge(src, mw, mh, x, y)) continue;
@@ -2822,6 +2955,7 @@
               }
             }
             ctx.stroke();
+            ctx.setLineDash([]);
             ctx.restore();
             return;
           }
@@ -2842,12 +2976,17 @@
         ctx.beginPath();
         if (ctx.roundRect) ctx.roundRect(x, y, bw, bh, r);
         else ctx.rect(x, y, bw, bh);
-        ctx.fillStyle = "rgba(74, 222, 128, 0.22)";
+        ctx.fillStyle =
+          visual === "holding"
+            ? "rgba(250, 204, 21, 0.16)"
+            : "rgba(74, 222, 128, 0.22)";
         ctx.fill();
-        ctx.strokeStyle = "rgba(74, 222, 128, 0.9)";
+        ctx.strokeStyle = stroke;
         ctx.lineWidth = Math.max(2, Math.round(ow / 180));
         ctx.lineJoin = "round";
+        if (dashed) ctx.setLineDash([7, 5]);
         ctx.stroke();
+        ctx.setLineDash([]);
         ctx.restore();
       }
 
@@ -2876,6 +3015,8 @@
         clearSubjectOverlay();
         hideCompositionGuide();
         clearStableMask();
+        hideLockBadge();
+        setAutoRescanVisible(false);
         setCoachHint("");
         if (coachEngine && coachEngine.clearTrackedSubject) {
           coachEngine.clearTrackedSubject();
@@ -2899,6 +3040,8 @@
         let lastMask = null;
         let lastSubject = null;
         let lostHintUntil = 0;
+        let lostSince = 0;
+        let lastBadgeState = "";
         while (coachActive && gen === coachDetectGen) {
           if (!stream || document.hidden) {
             await new Promise(function (r) { setTimeout(r, 400); });
@@ -2910,6 +3053,7 @@
             forceDetect = true;
             lastMask = null;
             lastSubject = null;
+            lostSince = 0;
             clearStableMask();
             if (coachHardReset) {
               coachHardReset = false;
@@ -2950,22 +3094,74 @@
             lastTapObjects = vision.objects || [];
             lastTapSize = { w: snap.srcW, h: snap.srcH };
 
-            const state = vision.lockState || "";
+            const state = vision.lockState || "searching";
+            const pinnedNow = !!(
+              coachEngine.getAssistLockState &&
+              coachEngine.getAssistLockState().pinned
+            );
+            const drawVisual =
+              state === "holding"
+                ? "holding"
+                : state === "locked"
+                  ? "locked"
+                  : "searching";
+
+            if (state !== lastBadgeState) {
+              setLockBadge(state, pinnedNow);
+              lastBadgeState = state;
+            } else if (state === "locked") {
+              setLockBadge(state, pinnedNow);
+            }
+
             if (subject && subject.bbox) {
               lastSubject = subject;
-              drawSubjectContour(lastMask, subject.bbox, snap.srcW, snap.srcH);
+              lostSince = 0;
+              drawSubjectContour(
+                lastMask,
+                subject.bbox,
+                snap.srcW,
+                snap.srcH,
+                drawVisual
+              );
               if (state === "locked" || state === "holding") {
                 if (Date.now() > lostHintUntil) setCoachHint("");
               }
             } else if (state === "holding" && lastSubject && lastSubject.bbox) {
-              drawSubjectContour(lastMask, lastSubject.bbox, snap.srcW, snap.srcH);
+              drawSubjectContour(
+                lastMask,
+                lastSubject.bbox,
+                snap.srcW,
+                snap.srcH,
+                "holding"
+              );
             } else {
               lastMask = null;
               lastSubject = null;
               clearSubjectOverlay();
               if (state === "lost") {
-                lostHintUntil = Date.now() + 1200;
-                setCoachHint("主体已丢失，点画面重新选定");
+                if (!lostSince) lostSince = Date.now();
+                lostHintUntil = Date.now() + 1600;
+                setCoachHint(
+                  autoRescanOn
+                    ? "主体丢失，正在重新寻找…"
+                    : "主体已丢失，点画面重新选定"
+                );
+                // 自动重搜：短暂等待后清 pin 并强制检测
+                if (
+                  autoRescanOn &&
+                  Date.now() - lostSince >= 1100 &&
+                  !coachReanalyzeSoon
+                ) {
+                  if (coachEngine.clearPinnedSubject) {
+                    coachEngine.clearPinnedSubject();
+                  }
+                  coachReanalyzeSoon = true;
+                  coachHardReset = false;
+                  lostSince = 0;
+                  setCoachHint("重新寻找主体…");
+                }
+              } else {
+                lostSince = 0;
               }
             }
 
@@ -2992,10 +3188,10 @@
             if (viewGen === coachViewGen) {
               clearSubjectOverlay();
               hideCompositionGuide();
+              hideLockBadge();
             }
           }
           const elapsed = Date.now() - started;
-          // 跟踪帧更快轮询；完整检测由引擎内部节流
           const wait = coachReanalyzeSoon ? 0 : Math.max(0, 85 - elapsed);
           await new Promise(function (r) { setTimeout(r, wait); });
         }
@@ -3009,6 +3205,8 @@
         coachActive = true;
         coachBtn.classList.add("active");
         setCoachHint("");
+        setAutoRescanVisible(true);
+        setLockBadge("searching", false);
         sizeSubjectOverlay();
         ensureMotionSensors().catch(function () {});
         ensureCompositionCoach().catch(function () {});
@@ -3177,7 +3375,8 @@
               mask || vision.mask,
               drawBox,
               snap.srcW,
-              snap.srcH
+              snap.srcH,
+              "locked"
             );
             if (shootMode === "landscape") {
               updateCompositionGuide(pinned, snap.srcW, snap.srcH, {
@@ -3244,6 +3443,28 @@
         coachBtn.classList.remove("pressed");
       });
       coachBtn.addEventListener("click", onCoachClick);
+      if (autoRescanBtn) {
+        syncAutoRescanBtn();
+        autoRescanBtn.addEventListener("click", function (ev) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          autoRescanOn = !autoRescanOn;
+          try {
+            localStorage.setItem(AUTO_RESCAN_KEY, autoRescanOn ? "1" : "0");
+          } catch (_) {}
+          syncAutoRescanBtn();
+          if (coachActive) {
+            setCoachHint(
+              autoRescanOn
+                ? "已开启丢失后自动重搜"
+                : "已关闭自动重搜，丢失后请点选"
+            );
+            window.setTimeout(function () {
+              if (coachActive) setCoachHint("");
+            }, 1400);
+          }
+        });
+      }
       if (stageEl) {
         stageEl.addEventListener("pointerdown", onStagePointerDown, {
           passive: true,
