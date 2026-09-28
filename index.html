@@ -667,6 +667,28 @@
     #compFocalHint.show {
       opacity: 1;
     }
+    #levelHint {
+      position: absolute;
+      left: 50%;
+      bottom: calc(148px + var(--safe-bottom));
+      transform: translateX(-50%);
+      max-width: min(86vw, 320px);
+      padding: 7px 14px;
+      border-radius: 999px;
+      background: rgba(0, 0, 0, 0.32);
+      color: rgba(255, 255, 255, 0.62);
+      font-size: 12px;
+      line-height: 1.3;
+      text-align: center;
+      opacity: 0;
+      transition: opacity 0.25s ease;
+      pointer-events: none;
+      white-space: nowrap;
+      z-index: 6;
+    }
+    #levelHint.show {
+      opacity: 1;
+    }
 
     /* 拍照后全屏预览：照片铺满，按钮半透明浮层 */
     #review {
@@ -761,6 +783,7 @@
         </div>
         <div id="compFocalHint"></div>
       </div>
+      <div id="levelHint" aria-hidden="true">请调整手机角度，保持画面水平</div>
     </div>
     <div id="review" aria-hidden="true">
       <img id="reviewImg" alt="预览" />
@@ -823,6 +846,7 @@
       const compGuide = document.getElementById("compGuide");
       const compFrame = document.getElementById("compFrame");
       const compFocalHint = document.getElementById("compFocalHint");
+      const levelHint = document.getElementById("levelHint");
       const review = document.getElementById("review");
       const reviewImg = document.getElementById("reviewImg");
       const reviewCancel = document.getElementById("reviewCancel");
@@ -1752,6 +1776,8 @@
 
           shutter.disabled = false;
           flipBtn.disabled = false;
+          // 用户手势链路内申请运动传感器（旋转锁定时仍可判横竖/水平）
+          ensureMotionSensors().catch(function () {});
           // 辅助拍摄：检测通过才启用
           coachBtn.disabled = !(deviceReport && deviceReport.assistOk);
           if (deviceReport && !deviceReport.assistOk) {
@@ -1782,13 +1808,14 @@
         flipping = true;
         flipBtn.disabled = true;
         try {
+          // 辅助开启时先关掉，再切前后镜头
+          if (coachActive) stopSubjectTracking();
           const next = facingMode === "environment" ? "user" : "environment";
           await openCamera(next);
           if (next === "user") {
             zoomFactor = 1;
             digitalScale = 1;
             updateFocalAvailability();
-            if (coachActive) stopSubjectTracking();
           } else {
             const presets = currentPresets();
             await applyZoomFactor(presets.defaultZoom);
@@ -1886,6 +1913,7 @@
         pendingReviewUrl = URL.createObjectURL(blob);
         reviewImg.src = pendingReviewUrl;
         if (controls) controls.classList.remove("show");
+        setLevelHint(false);
         review.classList.add("show");
         review.setAttribute("aria-hidden", "false");
       }
@@ -1962,7 +1990,7 @@
           base = pathName + "/" + fileName;
         }
         // 同域优先；jsDelivr 作备用（Pages 延迟时）
-        return base + "?v=20260928-fix1";
+        return base + "?v=20260928-level1";
       }
 
       /** 已成功加载过：静默热启动，不闪「下载资源」 */
@@ -2115,7 +2143,7 @@
           return coachEngine;
         } catch (_) {
           coachEngine = await import(
-            "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/coach-engine.js?v=20260928-fix1"
+            "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/coach-engine.js?v=20260928-level1"
           );
           return coachEngine;
         }
@@ -2128,7 +2156,7 @@
           return compositionCoach;
         } catch (_) {
           compositionCoach = await import(
-            "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/composition-coach.js?v=20260928-fix1"
+            "https://cdn.jsdelivr.net/gh/jon-hao/Doyen@main/composition-coach.js?v=20260928-level1"
           );
           return compositionCoach;
         }
@@ -2373,7 +2401,150 @@
         return { canvas: c, srcW: w, srcH: h };
       }
 
+      /** 加速度计物理姿态（旋转锁定时仍可用） */
+      let motionHold = null; // "landscape" | "portrait" | null
+      let motionTiltDeg = 0;
+      let motionLevel = true;
+      let motionListening = false;
+      let motionPermAsked = false;
+      let levelHintTimer = 0;
+
+      /**
+       * 用重力分量判断：手机是竖握还是横握，以及水平倾斜角。
+       * 不受 iOS「锁定竖屏」影响（屏幕方向不变，但加速度计仍反映物理姿态）。
+       */
+      function updateAttitudeFromGravity(ax, ay, az) {
+        if (
+          typeof ax !== "number" ||
+          typeof ay !== "number" ||
+          !isFinite(ax) ||
+          !isFinite(ay)
+        ) {
+          return;
+        }
+        const absX = Math.abs(ax);
+        const absY = Math.abs(ay);
+        const flat = Math.abs(az || 0);
+        // 几乎平放时不做水平提醒
+        if (flat > Math.max(absX, absY) * 1.35) {
+          motionLevel = true;
+          motionTiltDeg = 0;
+          setLevelHint(false);
+          return;
+        }
+
+        if (absX > absY * 1.15) motionHold = "landscape";
+        else if (absY > absX * 1.15) motionHold = "portrait";
+
+        // 屏幕平面内相对「竖直」的倾角；0 = 水平
+        let tilt;
+        if (motionHold === "landscape") {
+          tilt = (Math.atan2(ay, Math.abs(ax) || 0.001) * 180) / Math.PI;
+        } else {
+          tilt = (Math.atan2(ax, Math.abs(ay) || 0.001) * 180) / Math.PI;
+        }
+        motionTiltDeg = tilt;
+        // 迟滞：进入 >5° 提醒，回到 <3° 解除
+        if (!motionLevel && Math.abs(tilt) < 3) motionLevel = true;
+        else if (motionLevel && Math.abs(tilt) > 5) motionLevel = false;
+
+        setLevelHint(
+          !motionLevel &&
+            !!stream &&
+            controls &&
+            controls.classList.contains("show") &&
+            !(review && review.classList.contains("show"))
+        );
+      }
+
+      function setLevelHint(show) {
+        if (!levelHint) return;
+        if (show) {
+          levelHint.textContent = "请调整手机角度，保持画面水平";
+          levelHint.classList.add("show");
+          levelHint.setAttribute("aria-hidden", "false");
+        } else {
+          levelHint.classList.remove("show");
+          levelHint.setAttribute("aria-hidden", "true");
+        }
+      }
+
+      function onDeviceMotion(ev) {
+        const g =
+          (ev && ev.accelerationIncludingGravity) ||
+          (ev && ev.acceleration) ||
+          null;
+        if (!g) return;
+        // 部分浏览器符号相反，取绝对值比即可；tilt 用原始分量
+        updateAttitudeFromGravity(g.x, g.y, g.z);
+      }
+
+      function onDeviceOrientation(ev) {
+        // 无 motion 时的兜底：beta/gamma
+        if (motionListening && typeof DeviceMotionEvent !== "undefined") return;
+        const beta = Number(ev && ev.beta);
+        const gamma = Number(ev && ev.gamma);
+        if (!isFinite(beta) || !isFinite(gamma)) return;
+        // 近似映射到重力方向
+        const radB = (beta * Math.PI) / 180;
+        const radG = (gamma * Math.PI) / 180;
+        const ax = Math.sin(radG) * Math.cos(radB);
+        const ay = Math.sin(radB);
+        const az = Math.cos(radG) * Math.cos(radB);
+        updateAttitudeFromGravity(ax, ay, az);
+      }
+
+      async function ensureMotionSensors() {
+        if (motionListening) return true;
+        try {
+          if (
+            typeof DeviceMotionEvent !== "undefined" &&
+            typeof DeviceMotionEvent.requestPermission === "function" &&
+            !motionPermAsked
+          ) {
+            motionPermAsked = true;
+            const state = await DeviceMotionEvent.requestPermission();
+            if (state !== "granted") {
+              // 再试 orientation
+              if (
+                typeof DeviceOrientationEvent !== "undefined" &&
+                typeof DeviceOrientationEvent.requestPermission === "function"
+              ) {
+                const st2 = await DeviceOrientationEvent.requestPermission();
+                if (st2 !== "granted") return false;
+                window.addEventListener("deviceorientation", onDeviceOrientation, true);
+                motionListening = true;
+                return true;
+              }
+              return false;
+            }
+          } else if (
+            typeof DeviceOrientationEvent !== "undefined" &&
+            typeof DeviceOrientationEvent.requestPermission === "function" &&
+            !motionPermAsked
+          ) {
+            motionPermAsked = true;
+            const state = await DeviceOrientationEvent.requestPermission();
+            if (state !== "granted") return false;
+          }
+        } catch (_) {
+          // 权限失败则静默，不影响拍摄
+        }
+
+        if (typeof DeviceMotionEvent !== "undefined") {
+          window.addEventListener("devicemotion", onDeviceMotion, true);
+          motionListening = true;
+        }
+        window.addEventListener("deviceorientation", onDeviceOrientation, true);
+        if (!motionListening) motionListening = true;
+        return true;
+      }
+
       function getHoldOrientation() {
+        // 优先物理握持（旋转锁定时 screen.orientation 可能一直是 portrait）
+        if (motionHold === "landscape" || motionHold === "portrait") {
+          return motionHold;
+        }
         try {
           if (screen.orientation && screen.orientation.type) {
             return String(screen.orientation.type).indexOf("landscape") >= 0
@@ -2757,6 +2928,7 @@
         coachBtn.classList.add("active");
         setCoachHint("");
         sizeSubjectOverlay();
+        ensureMotionSensors().catch(function () {});
         ensureCompositionCoach().catch(function () {});
         const gen = ++coachDetectGen;
         subjectTrackLoop(gen);

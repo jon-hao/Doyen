@@ -19,7 +19,8 @@
  *   suggestedMm:number,
  *   suggestedName:string,
  *   needFocalChange:boolean,
- *   areaRatio:number
+ *   areaRatio:number,
+ *   potentialGrade:"B"|"A"|"S"
  * }} CompositionGuide
  */
 
@@ -30,8 +31,17 @@ const POWER_POINTS = [
   [2 / 3, 2 / 3],
 ];
 
+const GRADE_A = 0.48;
+const GRADE_S = 0.72;
+
 function clamp01(v) {
   return Math.max(0, Math.min(1, v));
+}
+
+function gradeFromScore(score) {
+  if (score >= GRADE_S) return "S";
+  if (score >= GRADE_A) return "A";
+  return "B";
 }
 
 function boxCenter(b) {
@@ -61,7 +71,6 @@ function boxCompleteness(b, imgW, imgH) {
   return clamp01(s);
 }
 
-/** 三分法：主体中心距最近力量点（高斯衰减） */
 function scoreRuleOfThirds(nx, ny) {
   let best = 0;
   for (let i = 0; i < POWER_POINTS.length; i++) {
@@ -74,7 +83,6 @@ function scoreRuleOfThirds(nx, ny) {
   return best;
 }
 
-/** 中心构图备选（风景主体偏大时更合理） */
 function scoreCenter(nx, ny) {
   const dx = nx - 0.5;
   const dy = ny - 0.5;
@@ -82,16 +90,14 @@ function scoreCenter(nx, ny) {
   return Math.exp(-(d * d) / (2 * 0.16 * 0.16));
 }
 
-/** 尺寸甜区：风景主体约占画面 8%–32% 最佳 */
 function scoreSize(areaRatio) {
-  if (areaRatio < 0.03) return areaRatio / 0.03 * 0.35;
+  if (areaRatio < 0.03) return (areaRatio / 0.03) * 0.35;
   if (areaRatio < 0.08) return 0.35 + ((areaRatio - 0.03) / 0.05) * 0.45;
   if (areaRatio <= 0.32) return 1;
   if (areaRatio <= 0.5) return Math.max(0.2, 1 - (areaRatio - 0.32) / 0.18);
   return Math.max(0, 0.2 - (areaRatio - 0.5) * 0.5);
 }
 
-/** 视觉平衡：主体「视觉重心」靠近画面中心的和谐度（弱权重） */
 function scoreVisualBalance(nx, ny, areaRatio) {
   const mass = 0.35 + 0.65 * clamp01(areaRatio / 0.25);
   const dx = (nx - 0.5) * mass;
@@ -115,23 +121,43 @@ function nearestPowerPoint(nx, ny) {
   return { x: best[0], y: best[1] };
 }
 
+function composeScore(placement, size, completeness, balance) {
+  return clamp01(
+    placement * 0.48 + size * 0.28 + completeness * 0.16 + balance * 0.08
+  );
+}
+
+/** 仅靠移镜能达到的上限分（placement 满分） */
+function estimatePotentialScore(areaRatio, completeness, target) {
+  const size = scoreSize(areaRatio);
+  const balance = scoreVisualBalance(target.x, target.y, areaRatio);
+  return composeScore(1, size, completeness, balance);
+}
+
 /**
- * 在可用焦段里选最接近「理想主体占比」的焦距
- * 假设物距不变：zoom ∝ 1/sqrt(area) 近似
+ * 仅当当前焦段即使构图拉满也只能红档(B)时，才建议换焦。
+ * 有望到黄(A)/绿(S) → 不推荐换焦。
  */
-export function suggestFocalForSubject(areaRatio, currentZoom, focals) {
+export function suggestFocalForSubject(
+  areaRatio,
+  currentZoom,
+  focals,
+  potentialGrade
+) {
   const list = focals || [];
+  const cur = currentZoom || 1;
   if (!list.length) {
     return {
-      suggestedZoom: currentZoom,
+      suggestedZoom: cur,
       suggestedMm: 24,
       suggestedName: "广角",
       needFocalChange: false,
     };
   }
+
   const targetArea = 0.18;
   const safeArea = Math.max(0.02, Math.min(0.55, areaRatio || 0.1));
-  const idealZoom = (currentZoom || 1) * Math.sqrt(targetArea / safeArea);
+  const idealZoom = cur * Math.sqrt(targetArea / safeArea);
   let best = list[0];
   let bestDiff = Infinity;
   for (let i = 0; i < list.length; i++) {
@@ -141,8 +167,12 @@ export function suggestFocalForSubject(areaRatio, currentZoom, focals) {
       best = list[i];
     }
   }
-  const need =
-    Math.abs((currentZoom || 1) - best.zoom) / Math.max(best.zoom, 0.5) > 0.18;
+
+  const canReachYellowOrBetter =
+    potentialGrade === "A" || potentialGrade === "S";
+  const zoomGap = Math.abs(cur - best.zoom) / Math.max(best.zoom, 0.5) > 0.18;
+  const need = !canReachYellowOrBetter && zoomGap && potentialGrade === "B";
+
   return {
     suggestedZoom: best.zoom,
     suggestedMm: best.mm,
@@ -173,32 +203,29 @@ export function evaluateLandscapeComposition(subject, imgW, imgH, options) {
   const size = scoreSize(areaRatio);
   const balance = scoreVisualBalance(nx, ny, areaRatio);
 
-  // 综合：placement 主导，尺寸与完整度次之，平衡微调
-  const score = clamp01(
-    placement * 0.48 + size * 0.28 + completeness * 0.16 + balance * 0.08
-  );
+  const score = composeScore(placement, size, completeness, balance);
+  const grade = gradeFromScore(score);
 
-  let grade = "B";
   let color = "rgba(239, 68, 68, 0.72)";
-  if (score >= 0.72) {
-    grade = "S";
-    color = "rgba(74, 222, 128, 0.75)";
-  } else if (score >= 0.48) {
-    grade = "A";
-    color = "rgba(250, 204, 21, 0.75)";
-  }
+  if (grade === "S") color = "rgba(74, 222, 128, 0.75)";
+  else if (grade === "A") color = "rgba(250, 204, 21, 0.75)";
 
-  // 大主体更偏中心构图目标，小主体偏三分法
   const target =
     areaRatio > 0.28
       ? { x: 0.5, y: 0.5 }
       : nearestPowerPoint(nx, ny);
 
+  const potentialScore = estimatePotentialScore(
+    areaRatio,
+    completeness,
+    target
+  );
+  const potentialGrade = gradeFromScore(potentialScore);
+
   const ex = nx - target.x;
   const ey = ny - target.y;
   const dead = 0.035;
   const arrows = { up: 0, down: 0, left: 0, right: 0 };
-  // 主体相对目标偏哪边 → 镜头朝同侧移动，使主体移向目标
   if (ex > dead) arrows.right = clamp01((ex - dead) / 0.22);
   if (ex < -dead) arrows.left = clamp01((-ex - dead) / 0.22);
   if (ey > dead) arrows.down = clamp01((ey - dead) / 0.22);
@@ -207,7 +234,8 @@ export function evaluateLandscapeComposition(subject, imgW, imgH, options) {
   const focal = suggestFocalForSubject(
     areaRatio,
     (options && options.currentZoom) || 1,
-    (options && options.focals) || []
+    (options && options.focals) || [],
+    potentialGrade
   );
 
   return {
@@ -222,5 +250,6 @@ export function evaluateLandscapeComposition(subject, imgW, imgH, options) {
     suggestedName: focal.suggestedName,
     needFocalChange: focal.needFocalChange,
     areaRatio: areaRatio,
+    potentialGrade: potentialGrade,
   };
 }
