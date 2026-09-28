@@ -13,7 +13,7 @@
   <meta name="apple-mobile-web-app-title" content="Doyen" />
   <meta name="application-name" content="Doyen" />
   <meta name="theme-color" content="#1a1a1a" />
-  <meta name="doyen-app-version" content="0.103" />
+  <meta name="doyen-app-version" content="0.104" />
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
   <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png" />
@@ -845,7 +845,7 @@
   <script>
     (function () {
       /** 与 version.json 同步；发版时两处一起改 */
-      const APP_VERSION = "0.103";
+      const APP_VERSION = "0.104";
       const VERSION_RELOAD_KEY = "doyen_reload_for";
 
       async function checkAppVersionAndUpdate() {
@@ -2897,14 +2897,19 @@
       async function subjectTrackLoop(gen) {
         coachTracking = true;
         let lastMask = null;
+        let lastSubject = null;
+        let lostHintUntil = 0;
         while (coachActive && gen === coachDetectGen) {
           if (!stream || document.hidden) {
             await new Promise(function (r) { setTimeout(r, 400); });
             continue;
           }
+          let forceDetect = false;
           if (coachReanalyzeSoon) {
             coachReanalyzeSoon = false;
+            forceDetect = true;
             lastMask = null;
+            lastSubject = null;
             clearStableMask();
             if (coachHardReset) {
               coachHardReset = false;
@@ -2929,6 +2934,7 @@
             const vision = await coachEngine.detectSubjects(snap.canvas, null, {
               mode: modeNow,
               holdOrientation: holdNow,
+              forceDetect: forceDetect,
             });
             if (!coachActive || gen !== coachDetectGen) break;
             if (viewGen !== coachViewGen) continue;
@@ -2938,35 +2944,46 @@
             ) {
               continue;
             }
-            const subject =
-              vision.primary ||
-              coachEngine.pickPrimarySubject(
-                vision.objects || [],
-                snap.srcW,
-                snap.srcH,
-                modeNow,
-                snap.canvas
-              );
+            const subject = vision.primary || null;
             if (viewGen !== coachViewGen) continue;
             if (vision.mask) lastMask = vision.mask;
             lastTapObjects = vision.objects || [];
             lastTapSize = { w: snap.srcW, h: snap.srcH };
+
+            const state = vision.lockState || "";
             if (subject && subject.bbox) {
+              lastSubject = subject;
               drawSubjectContour(lastMask, subject.bbox, snap.srcW, snap.srcH);
+              if (state === "locked" || state === "holding") {
+                if (Date.now() > lostHintUntil) setCoachHint("");
+              }
+            } else if (state === "holding" && lastSubject && lastSubject.bbox) {
+              drawSubjectContour(lastMask, lastSubject.bbox, snap.srcW, snap.srcH);
             } else {
               lastMask = null;
+              lastSubject = null;
               clearSubjectOverlay();
+              if (state === "lost") {
+                lostHintUntil = Date.now() + 1200;
+                setCoachHint("主体已丢失，点画面重新选定");
+              }
             }
+
             if (modeNow === "landscape") {
               if (!compositionCoach) {
                 try {
                   await ensureCompositionCoach();
                 } catch (_) {}
               }
-              updateCompositionGuide(subject, snap.srcW, snap.srcH, {
-                canvas: snap.canvas,
-                objects: vision.objects || [],
-              });
+              updateCompositionGuide(
+                subject || (state === "holding" ? lastSubject : null),
+                snap.srcW,
+                snap.srcH,
+                {
+                  canvas: snap.canvas,
+                  objects: vision.objects || [],
+                }
+              );
             } else {
               hideCompositionGuide();
             }
@@ -2978,7 +2995,8 @@
             }
           }
           const elapsed = Date.now() - started;
-          const wait = coachReanalyzeSoon ? 0 : Math.max(0, 100 - elapsed);
+          // 跟踪帧更快轮询；完整检测由引擎内部节流
+          const wait = coachReanalyzeSoon ? 0 : Math.max(0, 85 - elapsed);
           await new Promise(function (r) { setTimeout(r, wait); });
         }
         if (gen === coachDetectGen) {
@@ -3033,6 +3051,48 @@
         }, 950);
       }
 
+      /**
+       * Web 点按对焦：仅当 track capabilities 支持时生效（多为 Android Chrome）。
+       * iOS Safari 通常不可用，只保留对焦框动画。
+       * @returns {Promise<boolean>}
+       */
+      async function tryTapFocusAt(nx, ny) {
+        const track = getTrack();
+        if (!track || typeof track.getCapabilities !== "function") return false;
+        let caps;
+        try {
+          caps = track.getCapabilities();
+        } catch (_) {
+          return false;
+        }
+        if (!caps) return false;
+        const x = Math.max(0, Math.min(1, nx));
+        const y = Math.max(0, Math.min(1, ny));
+        const advanced = {};
+        let usable = false;
+        if (caps.pointsOfInterest) {
+          advanced.pointsOfInterest = [{ x: x, y: y }];
+          usable = true;
+        }
+        const modes = caps.focusMode;
+        if (modes && typeof modes.indexOf === "function") {
+          if (modes.indexOf("single-shot") >= 0) {
+            advanced.focusMode = "single-shot";
+            usable = true;
+          } else if (modes.indexOf("continuous") >= 0 && advanced.pointsOfInterest) {
+            advanced.focusMode = "continuous";
+            usable = true;
+          }
+        }
+        if (!usable) return false;
+        try {
+          await track.applyConstraints({ advanced: [advanced] });
+          return true;
+        } catch (_) {
+          return false;
+        }
+      }
+
       function onStagePointerDown(ev) {
         if (!stream) return;
         if (!controls || !controls.classList.contains("show")) return;
@@ -3042,6 +3102,13 @@
           return;
         }
         showTapFocus(ev.clientX, ev.clientY);
+        // 单击：对焦（能力允许时）+ 辅助开启时选定主体
+        if (stageEl) {
+          const rect = stageEl.getBoundingClientRect();
+          const nx = (ev.clientX - rect.left) / Math.max(1, rect.width);
+          const ny = (ev.clientY - rect.top) / Math.max(1, rect.height);
+          tryTapFocusAt(nx, ny).catch(function () {});
+        }
         if (coachActive) {
           pinSubjectFromTap(ev.clientX, ev.clientY);
         }
@@ -3062,10 +3129,11 @@
           }
           const modeNow =
             shootMode === "portrait" ? "portrait" : "landscape";
-          // 点击锁定始终用当前帧重检，避免旧 objects 导致失效
+          // 点击锁定：强制本帧完整检测
           const vision = await coachEngine.detectSubjects(snap.canvas, null, {
             mode: modeNow,
             holdOrientation: getHoldOrientation(),
+            forceDetect: true,
           });
           const objects = vision.objects || [];
           lastTapObjects = objects;
@@ -3081,6 +3149,7 @@
           );
           if (pinned && pinned.bbox) {
             clearStableMask();
+            setCoachHint("");
             let mask =
               coachEngine.segmentSubjectMask &&
               coachEngine.segmentSubjectMask(

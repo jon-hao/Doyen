@@ -36,6 +36,29 @@ let subjectMode = "landscape";
 /** @type {"landscape" | "portrait"} 手机横握/竖握 */
 let holdOrientation = "portrait";
 
+/** 检测降频：完整 OD 间隔；中间帧只做分割跟踪 */
+const DETECT_INTERVAL_MS = 280;
+/** 丢失后短暂保持最后一框的帧数 */
+const TRACK_HOLD_FRAMES = 10;
+const PIN_HOLD_FRAMES = 14;
+const MASK_EMA_ALPHA = 0.38;
+
+let lastDetectAt = 0;
+/** @type {Array} */
+let lastObjects = [];
+/** @type {null|{width:number,height:number,data:Uint8Array}} */
+let smoothMask = null;
+/** @type {"searching"|"locked"|"holding"|"lost"} */
+let lockState = "searching";
+
+export function getAssistLockState() {
+  return {
+    state: lockState,
+    pinned: !!pinnedSubject,
+    tracked: !!(trackedSubject && trackedSubject.bbox),
+  };
+}
+
 /**
  * 风景 / 人像 切换检测策略。
  * 人像：检测器只输出 person；风景：全类别里挑独立主体。
@@ -48,6 +71,10 @@ export async function setSubjectMode(mode) {
   pinnedSubject = null;
   trackMissStreak = 0;
   pinMissStreak = 0;
+  lastDetectAt = 0;
+  lastObjects = [];
+  smoothMask = null;
+  lockState = "searching";
   if (!detector || typeof detector.setOptions !== "function") return subjectMode;
   try {
     if (subjectMode === "portrait") {
@@ -268,6 +295,10 @@ export function resetCoachRuntime() {
   trackMissStreak = 0;
   pinMissStreak = 0;
   subjectMode = "landscape";
+  lastDetectAt = 0;
+  lastObjects = [];
+  smoothMask = null;
+  lockState = "searching";
 }
 export function getCoachDevice() {
   return deviceUsed;
@@ -1129,10 +1160,51 @@ function detectionsToObjects(result) {
   return objects;
 }
 
+function emaBlendMask(prev, next) {
+  if (!next || !next.data) return prev;
+  if (
+    !prev ||
+    !prev.data ||
+    prev.width !== next.width ||
+    prev.height !== next.height
+  ) {
+    return {
+      width: next.width,
+      height: next.height,
+      data: new Uint8Array(next.data),
+    };
+  }
+  const a = MASK_EMA_ALPHA;
+  const out = new Uint8Array(next.data.length);
+  for (let i = 0; i < out.length; i++) {
+    const pv = prev.data[i] > 0 ? 1 : 0;
+    const nv = next.data[i] > 0 ? 1 : 0;
+    out[i] = pv * (1 - a) + nv * a >= 0.42 ? 1 : 0;
+  }
+  return { width: next.width, height: next.height, data: out };
+}
+
+function seedFromSubject(subject, imgW, imgH) {
+  if (pinnedSubject && typeof pinnedSubject.nx === "number") {
+    return { nx: pinnedSubject.nx, ny: pinnedSubject.ny };
+  }
+  if (!subject || !subject.bbox) return { nx: 0.5, ny: 0.5 };
+  const b = subject.bbox;
+  const cx =
+    (Math.min(b[0], b[2]) + Math.max(b[0], b[2])) / 2 / Math.max(1, imgW);
+  const cy =
+    (Math.min(b[1], b[3]) + Math.max(b[1], b[3])) / 2 / Math.max(1, imgH);
+  return { nx: cx, ny: cy };
+}
+
 /**
  * @param {Blob|HTMLCanvasElement} source
  * @param {function=} onProgress
- * @param {{mode?: "landscape"|"portrait", holdOrientation?: "landscape"|"portrait"}=} options
+ * @param {{
+ *   mode?: "landscape"|"portrait",
+ *   holdOrientation?: "landscape"|"portrait",
+ *   forceDetect?: boolean
+ * }=} options
  */
 export async function detectSubjects(source, onProgress, options) {
   if (!detector || !warmed) {
@@ -1148,54 +1220,68 @@ export async function detectSubjects(source, onProgress, options) {
   }
 
   const canvas = canvasFromSource(source);
-  videoTs += 33;
-  let result;
-  try {
-    result = detector.detectForVideo(canvas, videoTs);
-  } catch (_) {
-    result = detector.detect(canvas);
+  const now = Date.now();
+  const forceDetect = !!(options && options.forceDetect);
+  const needDetect =
+    forceDetect ||
+    !lastDetectAt ||
+    now - lastDetectAt >= DETECT_INTERVAL_MS ||
+    (!trackedSubject && !pinnedSubject);
+
+  let objects = lastObjects;
+  if (needDetect) {
+    videoTs += 33;
+    let result;
+    try {
+      result = detector.detectForVideo(canvas, videoTs);
+    } catch (_) {
+      result = detector.detect(canvas);
+    }
+    objects = detectionsToObjects(result);
+    if (mode === "portrait") {
+      objects = objects.filter(function (o) {
+        return isPersonLabel(o.label);
+      });
+    }
+    lastObjects = objects;
+    lastDetectAt = now;
   }
 
-  let objects = detectionsToObjects(result);
-  if (mode === "portrait") {
-    objects = objects.filter(function (o) {
-      return isPersonLabel(o.label);
-    });
+  let primaryRaw = null;
+  if (needDetect) {
+    primaryRaw = pickPrimarySubject(
+      objects,
+      canvas.width,
+      canvas.height,
+      mode,
+      canvas
+    );
+  } else if (pinnedSubject && pinnedSubject.bbox) {
+    primaryRaw = {
+      label: pinnedSubject.label,
+      score: pinnedSubject.score,
+      bbox: pinnedSubject.bbox.slice(),
+    };
+  } else if (trackedSubject && trackedSubject.bbox) {
+    primaryRaw = {
+      label: trackedSubject.label,
+      score: trackedSubject.score,
+      bbox: trackedSubject.bbox.slice(),
+    };
   }
-  // 对外仍返回原始检测（点击选框用），但选主与描边走单体管线
-  const primaryRaw = pickPrimarySubject(
-    objects,
-    canvas.width,
-    canvas.height,
-    mode,
-    canvas
-  );
+
   let primary = stabilizeSubject(primaryRaw, canvas.width, canvas.height, mode);
 
+  // 跟踪帧：用分割收紧框，不重跑 OD
   let mask = null;
   if (primary && primary.bbox) {
-    const cx =
-      (Math.min(primary.bbox[0], primary.bbox[2]) +
-        Math.max(primary.bbox[0], primary.bbox[2])) /
-      2;
-    const cy =
-      (Math.min(primary.bbox[1], primary.bbox[3]) +
-        Math.max(primary.bbox[1], primary.bbox[3])) /
-      2;
-    const nx =
-      pinnedSubject && typeof pinnedSubject.nx === "number"
-        ? pinnedSubject.nx
-        : cx / Math.max(1, canvas.width);
-    const ny =
-      pinnedSubject && typeof pinnedSubject.ny === "number"
-        ? pinnedSubject.ny
-        : cy / Math.max(1, canvas.height);
-    mask = segmentSubjectMask(canvas, nx, ny);
+    const seed = seedFromSubject(primary, canvas.width, canvas.height);
+    mask = segmentSubjectMask(canvas, seed.nx, seed.ny);
     if (mask) {
       const refined = finalizeSingleSubjectMask(
         mask,
-        nx,
-        ny,
+        seed.nx,
+        seed.ny,
         primary.bbox,
         canvas.width,
         canvas.height
@@ -1212,8 +1298,32 @@ export async function detectSubjects(source, onProgress, options) {
           trackedSubject.label = primary.label;
           trackedSubject.score = primary.score;
         }
+        if (pinnedSubject && pinnedSubject.bbox) {
+          pinnedSubject.bbox = refined.bbox.slice();
+        }
       }
     }
+  }
+
+  if (mask) {
+    smoothMask = emaBlendMask(smoothMask, mask);
+    mask = smoothMask;
+  } else if (primary && smoothMask) {
+    mask = smoothMask;
+  } else {
+    smoothMask = null;
+  }
+
+  if (pinnedSubject && primary) {
+    lockState = "locked";
+  } else if (primary && trackedSubject) {
+    lockState = trackMissStreak > 0 ? "holding" : "locked";
+  } else if (trackMissStreak > 0 && trackedSubject) {
+    lockState = "holding";
+  } else if (!primary) {
+    lockState = lockState === "locked" || lockState === "holding" ? "lost" : "searching";
+  } else {
+    lockState = "locked";
   }
 
   return {
@@ -1223,6 +1333,8 @@ export async function detectSubjects(source, onProgress, options) {
     mode: mode,
     imageSize: [canvas.width, canvas.height],
     device: deviceUsed,
+    lockState: lockState,
+    didDetect: needDetect,
   };
 }
 
@@ -1297,12 +1409,16 @@ export function pinSubjectAt(objects, x, y, imgW, imgH, mode) {
     bbox: best.bbox.slice(),
   };
   trackMissStreak = 0;
+  smoothMask = null;
+  lockState = "locked";
+  lastDetectAt = 0; // 下一帧强制重检以对齐锁定体
   return pinnedSubject;
 }
 
 export function clearPinnedSubject() {
   pinnedSubject = null;
   pinMissStreak = 0;
+  if (!trackedSubject) lockState = "searching";
 }
 
 /**
@@ -1377,14 +1493,43 @@ export async function analyzeFrame(source, onProgress, options) {
   };
 }
 
+function matchesPinned(obj, imgW, imgH) {
+  if (!pinnedSubject || !obj || !obj.bbox) return false;
+  const iou = boxIoU(pinnedSubject.bbox, obj.bbox);
+  const px = (pinnedSubject.nx || 0.5) * imgW;
+  const py = (pinnedSubject.ny || 0.5) * imgH;
+  const b = obj.bbox;
+  const inside =
+    px >= Math.min(b[0], b[2]) &&
+    px <= Math.max(b[0], b[2]) &&
+    py >= Math.min(b[1], b[3]) &&
+    py <= Math.max(b[1], b[3]);
+  return inside || iou >= 0.12;
+}
+
 /**
  * 风景：类 SOD + 构图先验，挑一个独立主体（不强制人）
  * 人像：只框人；没人则返回 null
- * 用户点击锁定的主体优先级最高
+ * 用户点击锁定后：独占，绝不切换到其它主体
  */
 export function pickPrimarySubject(objects, imgW, imgH, mode, canvas) {
   const list = objects || [];
-  if (!list.length) return null;
+  if (!list.length) {
+    if (pinnedSubject && pinnedSubject.bbox) {
+      pinMissStreak += 1;
+      if (pinMissStreak >= PIN_HOLD_FRAMES) {
+        pinnedSubject = null;
+        pinMissStreak = 0;
+        return null;
+      }
+      return {
+        label: pinnedSubject.label,
+        score: pinnedSubject.score,
+        bbox: pinnedSubject.bbox.slice(),
+      };
+    }
+    return null;
+  }
   const m = mode === "portrait" ? "portrait" : "landscape";
 
   let basePool;
@@ -1392,52 +1537,74 @@ export function pickPrimarySubject(objects, imgW, imgH, mode, canvas) {
     basePool = list.filter(function (o) {
       return isPersonLabel(o.label);
     });
-    if (!basePool.length) return null;
+    if (!basePool.length) {
+      if (pinnedSubject && pinnedSubject.bbox) {
+        pinMissStreak += 1;
+        if (pinMissStreak >= PIN_HOLD_FRAMES) {
+          pinnedSubject = null;
+          pinMissStreak = 0;
+          return null;
+        }
+        return {
+          label: pinnedSubject.label,
+          score: pinnedSubject.score,
+          bbox: pinnedSubject.bbox.slice(),
+        };
+      }
+      return null;
+    }
   } else {
     basePool = list;
   }
 
-  const pool = prepareSingleSubjectPool(basePool);
+  let pool = prepareSingleSubjectPool(basePool);
+
+  // 锁定独占：只在匹配锁定体的候选里选
+  if (pinnedSubject) {
+    const matched = pool.filter(function (o) {
+      return matchesPinned(o, imgW, imgH);
+    });
+    if (matched.length) {
+      pool = matched;
+      pinMissStreak = 0;
+    } else {
+      pinMissStreak += 1;
+      if (pinMissStreak >= PIN_HOLD_FRAMES) {
+        pinnedSubject = null;
+        pinMissStreak = 0;
+        // 解锁后用全量 pool 重选
+      } else {
+        return {
+          label: pinnedSubject.label,
+          score: pinnedSubject.score,
+          bbox: pinnedSubject.bbox.slice(),
+        };
+      }
+    }
+  }
+
   let best = null;
   let bestScore = -1;
-  let secondScore = -1;
   for (let i = 0; i < pool.length; i++) {
     let s = subjectSalience(pool[i], imgW, imgH, m, canvas);
 
-    if (pinnedSubject && pinnedSubject.bbox && pool[i].bbox) {
-      const iou = boxIoU(pinnedSubject.bbox, pool[i].bbox);
-      const px = (pinnedSubject.nx || 0.5) * imgW;
-      const py = (pinnedSubject.ny || 0.5) * imgH;
-      const b = pool[i].bbox;
-      const inside =
-        px >= Math.min(b[0], b[2]) &&
-        px <= Math.max(b[0], b[2]) &&
-        py >= Math.min(b[1], b[3]) &&
-        py <= Math.max(b[1], b[3]);
-      if (inside || iou >= 0.2) {
-        s += 100;
-      } else if (iou >= 0.08) {
-        s += 40;
-      }
+    if (pinnedSubject && matchesPinned(pool[i], imgW, imgH)) {
+      s += 100;
     }
 
     if (trackedSubject && trackedSubject.bbox && pool[i].bbox) {
       const iou = boxIoU(trackedSubject.bbox, pool[i].bbox);
-      if (iou >= 0.25) s += m === "portrait" ? 2.2 : 1.4;
-      else if (iou >= 0.12) s += m === "portrait" ? 1.0 : 0.6;
+      if (iou >= 0.25) s += m === "portrait" ? 3.2 : 2.4;
+      else if (iou >= 0.12) s += m === "portrait" ? 1.4 : 1.0;
     }
     if (s > bestScore) {
-      secondScore = bestScore;
       bestScore = s;
       best = pool[i];
-    } else if (s > secondScore) {
-      secondScore = s;
     }
   }
 
-  // Winner-takes-all：若次优几乎同分且不与最优重叠，仍只取最优（已保证单框）
-  // 若次优中心落在最优框内 → 最优多半是并集，改选更紧的次优
-  if (best && pool.length > 1 && secondScore > 0) {
+  // 并集大框：次优中心在最优内 → 改选更紧的次优
+  if (best && pool.length > 1 && !pinnedSubject) {
     let rival = null;
     let rivalScore = -1;
     for (let i = 0; i < pool.length; i++) {
@@ -1445,7 +1612,7 @@ export function pickPrimarySubject(objects, imgW, imgH, mode, canvas) {
       let s = subjectSalience(pool[i], imgW, imgH, m, canvas);
       if (trackedSubject && trackedSubject.bbox && pool[i].bbox) {
         const iou = boxIoU(trackedSubject.bbox, pool[i].bbox);
-        if (iou >= 0.25) s += m === "portrait" ? 2.2 : 1.4;
+        if (iou >= 0.25) s += m === "portrait" ? 3.2 : 2.4;
       }
       if (s > rivalScore) {
         rivalScore = s;
@@ -1465,34 +1632,42 @@ export function pickPrimarySubject(objects, imgW, imgH, mode, canvas) {
     }
   }
 
-  if (pinnedSubject) {
-    if (
-      best &&
-      best.bbox &&
-      (boxIoU(pinnedSubject.bbox, best.bbox) >= 0.12 ||
-        (function () {
-          const px = (pinnedSubject.nx || 0.5) * imgW;
-          const py = (pinnedSubject.ny || 0.5) * imgH;
-          const b = best.bbox;
-          return (
-            px >= Math.min(b[0], b[2]) &&
-            px <= Math.max(b[0], b[2]) &&
-            py >= Math.min(b[1], b[3]) &&
-            py <= Math.max(b[1], b[3])
-          );
-        })())
-    ) {
-      pinMissStreak = 0;
-      pinnedSubject.bbox = best.bbox.slice();
-      pinnedSubject.label = best.label;
-      pinnedSubject.score = best.score;
-    } else {
-      pinMissStreak += 1;
-      if (pinMissStreak >= 8) {
-        pinnedSubject = null;
-        pinMissStreak = 0;
+  // 软锁定迟滞：已有跟踪时，勿因略高分跳到无关第二主体
+  if (
+    !pinnedSubject &&
+    trackedSubject &&
+    trackedSubject.bbox &&
+    best &&
+    best.bbox &&
+    boxIoU(trackedSubject.bbox, best.bbox) < 0.12
+  ) {
+    let cont = null;
+    let contScore = -1;
+    for (let i = 0; i < pool.length; i++) {
+      const iou = boxIoU(trackedSubject.bbox, pool[i].bbox);
+      if (iou < 0.12) continue;
+      const s = subjectSalience(pool[i], imgW, imgH, m, canvas) + iou * 4;
+      if (s > contScore) {
+        contScore = s;
+        cont = pool[i];
       }
     }
+    if (cont) {
+      best = cont;
+    } else if (bestScore < subjectSalience(trackedSubject, imgW, imgH, m, canvas) * 1.4) {
+      best = {
+        label: trackedSubject.label,
+        score: trackedSubject.score,
+        bbox: trackedSubject.bbox.slice(),
+      };
+    }
+  }
+
+  if (pinnedSubject && best && matchesPinned(best, imgW, imgH)) {
+    pinMissStreak = 0;
+    pinnedSubject.bbox = best.bbox.slice();
+    pinnedSubject.label = best.label;
+    pinnedSubject.score = best.score;
   }
 
   return best;
@@ -1512,10 +1687,13 @@ export function stabilizeSubject(next, imgW, imgH, mode) {
 
   if (!next || !next.bbox) {
     trackMissStreak += 1;
-    if (trackMissStreak >= 4) {
+    if (trackMissStreak >= TRACK_HOLD_FRAMES) {
       trackedSubject = null;
+      smoothMask = null;
+      if (!pinnedSubject) lockState = "lost";
       return null;
     }
+    lockState = "holding";
     return trackedSubject;
   }
   trackMissStreak = 0;
@@ -1603,4 +1781,8 @@ export function clearTrackedSubject() {
   pinnedSubject = null;
   trackMissStreak = 0;
   pinMissStreak = 0;
+  lastDetectAt = 0;
+  lastObjects = [];
+  smoothMask = null;
+  lockState = "searching";
 }
