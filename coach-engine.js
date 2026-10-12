@@ -49,13 +49,13 @@ let subjectMode = "landscape";
 /** @type {"landscape" | "portrait"} 手机横握/竖握 */
 let holdOrientation = "portrait";
 
-/** 检测降频：完整 OD/显著性间隔；中间帧只做分割跟踪 */
-const DETECT_INTERVAL_MS = 120;
-const DETECT_INTERVAL_U2_MS = 180;
+/** 完整 OD/显著性间隔：辅助开启后持续重识别，跟手优先 */
+const DETECT_INTERVAL_MS = 70;
+const DETECT_INTERVAL_U2_MS = 95;
 /** 丢失后短暂保持最后一框的帧数 */
-const TRACK_HOLD_FRAMES = 10;
-const PIN_HOLD_FRAMES = 14;
-const MASK_EMA_ALPHA = 0.38;
+const TRACK_HOLD_FRAMES = 4;
+const PIN_HOLD_FRAMES = 3;
+const MASK_EMA_ALPHA = 0.55;
 
 let lastDetectAt = 0;
 /** @type {Array} */
@@ -1335,11 +1335,25 @@ export async function detectSubjects(source, onProgress, options) {
   let objects = lastObjects;
   let primaryRaw = null;
   let mask = null;
-  const pinSeed =
-    pinnedSubject && typeof pinnedSubject.nx === "number"
-      ? { nx: pinnedSubject.nx, ny: pinnedSubject.ny }
-      : null;
 
+  function maskPreferSeed() {
+    const seed = seedFromSubject(
+      pinnedSubject || trackedSubject,
+      canvas.width,
+      canvas.height
+    );
+    const prevBbox =
+      (pinnedSubject && pinnedSubject.bbox) ||
+      (trackedSubject && trackedSubject.bbox) ||
+      null;
+    return {
+      nx: seed.nx,
+      ny: seed.ny,
+      prevBbox: prevBbox,
+    };
+  }
+
+  // 辅助拍摄开启后持续跑模型；间隔内仍做人像 Selfie / MagicTouch，不复用冻框
   if (needDetect) {
     videoTs += 33;
     lastDetectAt = now;
@@ -1353,7 +1367,7 @@ export async function detectSubjects(source, onProgress, options) {
           canvas.width,
           canvas.height,
           "person",
-          pinSeed
+          maskPreferSeed()
         );
         if (hit) {
           primaryRaw = {
@@ -1374,7 +1388,7 @@ export async function detectSubjects(source, onProgress, options) {
             canvas.width,
             canvas.height,
             "subject",
-            pinSeed
+            maskPreferSeed()
           );
           if (hit) {
             primaryRaw = {
@@ -1412,56 +1426,77 @@ export async function detectSubjects(source, onProgress, options) {
         canvas
       );
     } else if (pinnedSubject && primaryRaw.bbox) {
-      // 显著性命中时同步 pin 框
       pinMissStreak = 0;
       pinnedSubject.bbox = primaryRaw.bbox.slice();
       pinnedSubject.label = primaryRaw.label;
       pinnedSubject.score = primaryRaw.score;
+      syncPinCenterFromBbox(primaryRaw.bbox, canvas.width, canvas.height);
     }
   } else {
-    // 跟踪帧：不以旧框为最终结果，每帧从当前跟踪/锁定中心重分割
+    // 轻量帧：仍跑分割，禁止直接抄旧 bbox
     videoTs += 33;
-    const anchor =
-      pinnedSubject && pinnedSubject.bbox
-        ? pinnedSubject
-        : trackedSubject && trackedSubject.bbox
-          ? trackedSubject
-          : null;
-    if (anchor) {
-      const seed = seedFromSubject(anchor, canvas.width, canvas.height);
-      if (mode === "portrait" && hasSelfieSegmenter()) {
-        const selfie = runSelfieMask(canvas, videoTs);
-        if (selfie) {
-          const hit = primaryFromMask(
-            selfie,
-            canvas.width,
-            canvas.height,
-            "person",
-            seed
-          );
-          if (hit) {
-            primaryRaw = {
-              label: hit.label,
-              score: hit.score,
-              bbox: hit.bbox.slice(),
-            };
-            mask = hit.mask;
-          }
+    const prefer = maskPreferSeed();
+    if (mode === "portrait" && hasSelfieSegmenter()) {
+      const selfie = runSelfieMask(canvas, videoTs);
+      if (selfie) {
+        const hit = primaryFromMask(
+          selfie,
+          canvas.width,
+          canvas.height,
+          "person",
+          prefer
+        );
+        if (hit) {
+          primaryRaw = {
+            label: hit.label,
+            score: hit.score,
+            bbox: hit.bbox.slice(),
+          };
+          mask = hit.mask;
         }
       }
-      if (!primaryRaw) {
+    } else if (mode === "landscape" && lastSaliencyMask) {
+      const hit = primaryFromMask(
+        lastSaliencyMask,
+        canvas.width,
+        canvas.height,
+        "subject",
+        prefer
+      );
+      if (hit) {
         primaryRaw = {
-          label: anchor.label,
-          score: anchor.score,
-          bbox: anchor.bbox.slice(),
+          label: hit.label,
+          score: hit.score,
+          bbox: hit.bbox.slice(),
         };
+        mask = hit.mask;
+      }
+    }
+    if (!primaryRaw && !mask) {
+      const touch = segmentSubjectMask(canvas, prefer.nx, prefer.ny);
+      if (touch) {
+        const hit = primaryFromMask(
+          touch,
+          canvas.width,
+          canvas.height,
+          mode === "portrait" ? "person" : "subject",
+          prefer
+        );
+        if (hit) {
+          primaryRaw = {
+            label: hit.label,
+            score: hit.score,
+            bbox: hit.bbox.slice(),
+          };
+          mask = hit.mask;
+        }
       }
     }
   }
 
   let primary = stabilizeSubject(primaryRaw, canvas.width, canvas.height, mode);
 
-  // 跟踪帧或主路径未出 mask：MagicTouch 修边（跟踪帧优先新分割，不复用旧显著性）
+  // MagicTouch 修边；始终用当帧结果更新框，跟随镜头平移
   if (primary && primary.bbox) {
     const seed = seedFromSubject(primary, canvas.width, canvas.height);
     if (!mask) {
@@ -1788,23 +1823,17 @@ function matchesPinned(obj, imgW, imgH) {
 /**
  * 风景：类 SOD + 构图先验，挑一个独立主体（不强制人）
  * 人像：只框人；没人则返回 null
- * 用户点击锁定后：独占，绝不切换到其它主体
+ * 点击仅偏好主体，不冻结旧框；镜头移动时持续用当帧检测结果
  */
 export function pickPrimarySubject(objects, imgW, imgH, mode, canvas) {
   const list = objects || [];
   if (!list.length) {
-    if (pinnedSubject && pinnedSubject.bbox) {
+    if (pinnedSubject) {
       pinMissStreak += 1;
       if (pinMissStreak >= PIN_HOLD_FRAMES) {
         pinnedSubject = null;
         pinMissStreak = 0;
-        return null;
       }
-      return {
-        label: pinnedSubject.label,
-        score: pinnedSubject.score,
-        bbox: pinnedSubject.bbox.slice(),
-      };
     }
     return null;
   }
@@ -1816,18 +1845,12 @@ export function pickPrimarySubject(objects, imgW, imgH, mode, canvas) {
       return isPersonLabel(o.label);
     });
     if (!basePool.length) {
-      if (pinnedSubject && pinnedSubject.bbox) {
+      if (pinnedSubject) {
         pinMissStreak += 1;
         if (pinMissStreak >= PIN_HOLD_FRAMES) {
           pinnedSubject = null;
           pinMissStreak = 0;
-          return null;
         }
-        return {
-          label: pinnedSubject.label,
-          score: pinnedSubject.score,
-          bbox: pinnedSubject.bbox.slice(),
-        };
       }
       return null;
     }
@@ -1837,26 +1860,18 @@ export function pickPrimarySubject(objects, imgW, imgH, mode, canvas) {
 
   let pool = prepareSingleSubjectPool(basePool);
 
-  // 锁定独占：只在匹配锁定体的候选里选
+  // 点击偏好：有匹配则加权，无匹配则快速放开，绝不回传冻框
   if (pinnedSubject) {
     const matched = pool.filter(function (o) {
       return matchesPinned(o, imgW, imgH);
     });
     if (matched.length) {
-      pool = matched;
       pinMissStreak = 0;
     } else {
       pinMissStreak += 1;
       if (pinMissStreak >= PIN_HOLD_FRAMES) {
         pinnedSubject = null;
         pinMissStreak = 0;
-        // 解锁后用全量 pool 重选
-      } else {
-        return {
-          label: pinnedSubject.label,
-          score: pinnedSubject.score,
-          bbox: pinnedSubject.bbox.slice(),
-        };
       }
     }
   }
@@ -1867,13 +1882,22 @@ export function pickPrimarySubject(objects, imgW, imgH, mode, canvas) {
     let s = subjectSalience(pool[i], imgW, imgH, m, canvas);
 
     if (pinnedSubject && matchesPinned(pool[i], imgW, imgH)) {
-      s += 100;
+      s += 8;
     }
 
     if (trackedSubject && trackedSubject.bbox && pool[i].bbox) {
       const iou = boxIoU(trackedSubject.bbox, pool[i].bbox);
       if (iou >= 0.25) s += m === "portrait" ? 3.2 : 2.4;
       else if (iou >= 0.12) s += m === "portrait" ? 1.4 : 1.0;
+      else {
+        // 镜头大幅平移：用中心距离延续跟踪，不锁死旧框
+        const pc = boxCenterXY(trackedSubject.bbox);
+        const nc = boxCenterXY(pool[i].bbox);
+        const dist =
+          Math.hypot(pc.x - nc.x, pc.y - nc.y) /
+          Math.max(1, Math.min(imgW, imgH));
+        if (dist < 0.28) s += (0.28 - dist) * 6;
+      }
     }
     if (s > bestScore) {
       bestScore = s;
@@ -1882,7 +1906,7 @@ export function pickPrimarySubject(objects, imgW, imgH, mode, canvas) {
   }
 
   // 并集大框：次优中心在最优内 → 改选更紧的次优
-  if (best && pool.length > 1 && !pinnedSubject) {
+  if (best && pool.length > 1) {
     let rival = null;
     let rivalScore = -1;
     for (let i = 0; i < pool.length; i++) {
@@ -1910,36 +1934,12 @@ export function pickPrimarySubject(objects, imgW, imgH, mode, canvas) {
     }
   }
 
-  // 软锁定迟滞：已有跟踪时，勿因略高分跳到无关第二主体
-  if (
-    !pinnedSubject &&
-    trackedSubject &&
-    trackedSubject.bbox &&
-    best &&
-    best.bbox &&
-    boxIoU(trackedSubject.bbox, best.bbox) < 0.12
-  ) {
-    let cont = null;
-    let contScore = -1;
-    for (let i = 0; i < pool.length; i++) {
-      const iou = boxIoU(trackedSubject.bbox, pool[i].bbox);
-      if (iou < 0.12) continue;
-      const s = subjectSalience(pool[i], imgW, imgH, m, canvas) + iou * 4;
-      if (s > contScore) {
-        contScore = s;
-        cont = pool[i];
-      }
-    }
-    if (cont && boxIoU(trackedSubject.bbox, cont.bbox) >= 0.12) {
-      best = cont;
-    }
-  }
-
   if (pinnedSubject && best && matchesPinned(best, imgW, imgH)) {
     pinMissStreak = 0;
     pinnedSubject.bbox = best.bbox.slice();
     pinnedSubject.label = best.label;
     pinnedSubject.score = best.score;
+    syncPinCenterFromBbox(best.bbox, imgW, imgH);
   }
 
   return best;
@@ -2010,44 +2010,24 @@ export function stabilizeSubject(next, imgW, imgH, mode) {
   const areaDelta =
     Math.abs(nextArea - prevArea) / Math.max(prevArea, 1);
 
-  // 轻微晃动：框基本不动，但不要过死以免锁死旧主体
-  if (iou >= 0.62 && shift < 0.035 && areaDelta < 0.14) {
-    trackedSubject = {
-      label: next.label || trackedSubject.label,
-      score: next.score,
-      bbox: trackedSubject.bbox.slice(),
-    };
-    return trackedSubject;
-  }
-
-  // 同主体缓动；平移较大时加快跟随，避免框冻在旧位置
-  if (iou >= 0.28) {
-    let t = iou >= 0.5 && shift < 0.07 ? 0.1 : 0.22;
-    if (shift > 0.04) {
-      t = Math.min(0.7, Math.max(0.45, 0.38 + shift * 5.5));
-    }
-    trackedSubject = {
-      label: next.label || trackedSubject.label,
-      score: next.score,
-      bbox: lerpBox(trackedSubject.bbox, next.bbox, t),
-    };
-    return trackedSubject;
-  }
-
-  if (iou >= 0.12) {
-    let t = shift > 0.04 ? Math.min(0.65, 0.45 + shift * 4) : 0.4;
-    trackedSubject = {
-      label: next.label || trackedSubject.label,
-      score: next.score,
-      bbox: lerpBox(trackedSubject.bbox, next.bbox, t),
-    };
-    return trackedSubject;
+  // 跟手：几乎每帧贴近新检测，仅对极小抖动做轻缓动
+  let t = 0.72;
+  if (iou >= 0.55 && shift < 0.02 && areaDelta < 0.08) {
+    t = 0.35;
+  } else if (shift > 0.03) {
+    t = Math.min(0.92, 0.65 + shift * 4);
+  } else if (iou >= 0.28) {
+    t = 0.55;
+  } else if (iou >= 0.12) {
+    t = 0.7;
+  } else {
+    t = 0.88;
   }
 
   trackedSubject = {
-    label: next.label,
+    label: next.label || trackedSubject.label,
     score: next.score,
-    bbox: next.bbox.slice(),
+    bbox: lerpBox(trackedSubject.bbox, next.bbox, t),
   };
   return trackedSubject;
 }

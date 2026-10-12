@@ -268,18 +268,8 @@ export function primaryFromMask(mask, imgW, imgH, label, preferSeed) {
   const mh = mask.height | 0;
   const src = mask.data;
   const visited = new Uint8Array(mw * mh);
-
-  let bestCount = 0;
-  let bestMinX = 0;
-  let bestMinY = 0;
-  let bestMaxX = 0;
-  let bestMaxY = 0;
-  /** @type {Uint8Array|null} */
-  let bestComp = null;
-
-  let seedComp = null;
-  let seedCount = 0;
-  let seedBox = null;
+  const scaleX = Math.max(1, imgW) / mw;
+  const scaleY = Math.max(1, imgH) / mh;
 
   const wantSeed =
     preferSeed &&
@@ -291,6 +281,13 @@ export function primaryFromMask(mask, imgW, imgH, label, preferSeed) {
   const sy = wantSeed
     ? Math.max(0, Math.min(mh - 1, Math.round(preferSeed.ny * (mh - 1))))
     : -1;
+  const prev =
+    preferSeed && preferSeed.prevBbox && preferSeed.prevBbox.length >= 4
+      ? preferSeed.prevBbox
+      : null;
+
+  /** @type {Array<{comp:Uint8Array,count:number,box:number[],score:number}>} */
+  const cands = [];
 
   for (let y = 0; y < mh; y++) {
     for (let x = 0; x < mw; x++) {
@@ -334,35 +331,74 @@ export function primaryFromMask(mask, imgW, imgH, label, preferSeed) {
 
       if (count < 40) continue;
 
-      if (hitsSeed && count > seedCount) {
-        seedCount = count;
-        seedComp = comp;
-        seedBox = [minX, minY, maxX, maxY];
+      const cx = (minX + maxX) * 0.5;
+      const cy = (minY + maxY) * 0.5;
+      // 面积为主；种子邻近 / 上一框重叠用于跟随时切换连通域，避免冻在旧屏幕坐标
+      let rank = count;
+      if (wantSeed) {
+        const diag = Math.max(1, Math.hypot(mw, mh));
+        const dist = Math.hypot(cx - sx, cy - sy) / diag;
+        rank += (1 - Math.min(1, dist * 2.2)) * count * 1.15;
+        if (hitsSeed) rank += count * 0.35;
       }
-      if (count > bestCount) {
-        bestCount = count;
-        bestComp = comp;
-        bestMinX = minX;
-        bestMinY = minY;
-        bestMaxX = maxX;
-        bestMaxY = maxY;
+      if (prev) {
+        const bb = [
+          minX * scaleX,
+          minY * scaleY,
+          (maxX + 1) * scaleX,
+          (maxY + 1) * scaleY,
+        ];
+        const ax1 = Math.min(bb[0], bb[2]);
+        const ay1 = Math.min(bb[1], bb[3]);
+        const ax2 = Math.max(bb[0], bb[2]);
+        const ay2 = Math.max(bb[1], bb[3]);
+        const bx1 = Math.min(prev[0], prev[2]);
+        const by1 = Math.min(prev[1], prev[3]);
+        const bx2 = Math.max(prev[0], prev[2]);
+        const by2 = Math.max(prev[1], prev[3]);
+        const ix1 = Math.max(ax1, bx1);
+        const iy1 = Math.max(ay1, by1);
+        const ix2 = Math.min(ax2, bx2);
+        const iy2 = Math.min(ay2, by2);
+        const inter = Math.max(0, ix2 - ix1) * Math.max(0, iy2 - iy1);
+        const uni =
+          Math.max(0, ax2 - ax1) * Math.max(0, ay2 - ay1) +
+          Math.max(0, bx2 - bx1) * Math.max(0, by2 - by1) -
+          inter;
+        const iou = uni > 0 ? inter / uni : 0;
+        rank += iou * count * 1.8;
+        const pcx = (bx1 + bx2) * 0.5;
+        const pcy = (by1 + by2) * 0.5;
+        const cImgX = cx * scaleX;
+        const cImgY = cy * scaleY;
+        const pDist =
+          Math.hypot(cImgX - pcx, cImgY - pcy) /
+          Math.max(1, Math.min(imgW, imgH));
+        rank += (1 - Math.min(1, pDist * 2.5)) * count * 0.9;
       }
+
+      cands.push({
+        comp: comp,
+        count: count,
+        box: [minX, minY, maxX, maxY],
+        score: rank,
+      });
     }
   }
 
-  let useComp = bestComp;
-  let useCount = bestCount;
-  let box = [bestMinX, bestMinY, bestMaxX, bestMaxY];
-  if (seedComp && seedCount >= 40) {
-    useComp = seedComp;
-    useCount = seedCount;
-    box = seedBox;
-  }
-  if (!useComp || useCount < 40) return null;
+  if (!cands.length) return null;
+  cands.sort(function (a, b) {
+    return b.score - a.score;
+  });
+  const best = cands[0];
+  const useComp = best.comp;
+  const useCount = best.count;
+  const box = best.box;
 
-  const scaleX = Math.max(1, imgW) / mw;
-  const scaleY = Math.max(1, imgH) / mh;
-  const pad = Math.max(1, Math.round(Math.min(box[2] - box[0], box[3] - box[1]) * 0.04));
+  const pad = Math.max(
+    1,
+    Math.round(Math.min(box[2] - box[0], box[3] - box[1]) * 0.04)
+  );
   const bbox = [
     Math.max(0, (box[0] - pad) * scaleX),
     Math.max(0, (box[1] - pad) * scaleY),
