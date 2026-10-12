@@ -49,9 +49,9 @@ let subjectMode = "landscape";
 /** @type {"landscape" | "portrait"} 手机横握/竖握 */
 let holdOrientation = "portrait";
 
-/** 检测降频：完整 OD/显著性间隔；中间帧只做分割跟踪 */
-const DETECT_INTERVAL_MS = 280;
-const DETECT_INTERVAL_U2_MS = 420;
+/** 检测降频：完整 OD/显著性间隔；中间帧 MagicTouch/Selfie 跟手 */
+const DETECT_INTERVAL_MS = 160;
+const DETECT_INTERVAL_U2_MS = 220;
 /** 丢失后短暂保持最后一框的帧数 */
 const TRACK_HOLD_FRAMES = 10;
 const PIN_HOLD_FRAMES = 14;
@@ -1262,17 +1262,43 @@ function emaBlendMask(prev, next) {
   return { width: next.width, height: next.height, data: out };
 }
 
+function syncPinCenterFromBbox(bbox, imgW, imgH) {
+  if (!pinnedSubject || !bbox || bbox.length < 4) return;
+  const w = Math.max(1, imgW || 1);
+  const h = Math.max(1, imgH || 1);
+  const cx =
+    (Math.min(bbox[0], bbox[2]) + Math.max(bbox[0], bbox[2])) / 2;
+  const cy =
+    (Math.min(bbox[1], bbox[3]) + Math.max(bbox[1], bbox[3])) / 2;
+  pinnedSubject.nx = cx / w;
+  pinnedSubject.ny = cy / h;
+}
+
+/** 种子优先用当前框中心（跟镜头），避免冻在首次点击的屏幕坐标 */
 function seedFromSubject(subject, imgW, imgH) {
+  const w = Math.max(1, imgW || 1);
+  const h = Math.max(1, imgH || 1);
+  const ref =
+    pinnedSubject && pinnedSubject.bbox
+      ? pinnedSubject
+      : subject && subject.bbox
+        ? subject
+        : trackedSubject && trackedSubject.bbox
+          ? trackedSubject
+          : null;
+  if (ref && ref.bbox) {
+    const b = ref.bbox;
+    return {
+      nx:
+        (Math.min(b[0], b[2]) + Math.max(b[0], b[2])) / 2 / w,
+      ny:
+        (Math.min(b[1], b[3]) + Math.max(b[1], b[3])) / 2 / h,
+    };
+  }
   if (pinnedSubject && typeof pinnedSubject.nx === "number") {
     return { nx: pinnedSubject.nx, ny: pinnedSubject.ny };
   }
-  if (!subject || !subject.bbox) return { nx: 0.5, ny: 0.5 };
-  const b = subject.bbox;
-  const cx =
-    (Math.min(b[0], b[2]) + Math.max(b[0], b[2])) / 2 / Math.max(1, imgW);
-  const cy =
-    (Math.min(b[1], b[3]) + Math.max(b[1], b[3])) / 2 / Math.max(1, imgH);
-  return { nx: cx, ny: cy };
+  return { nx: 0.5, ny: 0.5 };
 }
 
 /**
@@ -1313,10 +1339,10 @@ export async function detectSubjects(source, onProgress, options) {
   let objects = lastObjects;
   let primaryRaw = null;
   let mask = null;
-  const pinSeed =
-    pinnedSubject && typeof pinnedSubject.nx === "number"
-      ? { nx: pinnedSubject.nx, ny: pinnedSubject.ny }
-      : null;
+  // 钉点/跟踪种子：用当前框中心，点击独占仍由 pickPrimarySubject 保证
+  const pinSeed = pinnedSubject
+    ? seedFromSubject(pinnedSubject, canvas.width, canvas.height)
+    : null;
 
   if (needDetect) {
     videoTs += 33;
@@ -1390,57 +1416,82 @@ export async function detectSubjects(source, onProgress, options) {
         canvas
       );
     } else if (pinnedSubject && primaryRaw.bbox) {
-      // 显著性命中时同步 pin 框
+      // 显著性命中时同步 pin 框 + 种子中心（跟镜头）
       pinMissStreak = 0;
       pinnedSubject.bbox = primaryRaw.bbox.slice();
       pinnedSubject.label = primaryRaw.label;
       pinnedSubject.score = primaryRaw.score;
+      syncPinCenterFromBbox(primaryRaw.bbox, canvas.width, canvas.height);
     }
-  } else if (pinnedSubject && pinnedSubject.bbox) {
-    primaryRaw = {
-      label: pinnedSubject.label,
-      score: pinnedSubject.score,
-      bbox: pinnedSubject.bbox.slice(),
-    };
-  } else if (trackedSubject && trackedSubject.bbox) {
-    primaryRaw = {
-      label: trackedSubject.label,
-      score: trackedSubject.score,
-      bbox: trackedSubject.bbox.slice(),
-    };
+  } else {
+    // 跟踪帧：禁止抄冻框；从当前框中心重分割，让绿框跟镜头走
+    videoTs += 33;
+    const anchor =
+      pinnedSubject && pinnedSubject.bbox
+        ? pinnedSubject
+        : trackedSubject && trackedSubject.bbox
+          ? trackedSubject
+          : null;
+    if (anchor) {
+      const seed = seedFromSubject(anchor, canvas.width, canvas.height);
+      if (mode === "portrait" && hasSelfieSegmenter()) {
+        const selfie = runSelfieMask(canvas, videoTs);
+        if (selfie) {
+          const hit = primaryFromMask(
+            selfie,
+            canvas.width,
+            canvas.height,
+            "person",
+            seed
+          );
+          if (hit) {
+            primaryRaw = {
+              label: hit.label,
+              score: hit.score,
+              bbox: hit.bbox.slice(),
+            };
+            mask = hit.mask;
+          }
+        }
+      }
+      if (!primaryRaw) {
+        const touch = segmentSubjectMask(canvas, seed.nx, seed.ny);
+        if (touch) {
+          const refined = finalizeSingleSubjectMask(
+            touch,
+            seed.nx,
+            seed.ny,
+            anchor.bbox,
+            canvas.width,
+            canvas.height
+          );
+          if (refined.bbox) {
+            primaryRaw = {
+              label: anchor.label,
+              score: anchor.score,
+              bbox: refined.bbox.slice(),
+            };
+            mask = refined.mask;
+          }
+        }
+      }
+      if (!primaryRaw) {
+        primaryRaw = {
+          label: anchor.label,
+          score: anchor.score,
+          bbox: anchor.bbox.slice(),
+        };
+      }
+    }
   }
 
   let primary = stabilizeSubject(primaryRaw, canvas.width, canvas.height, mode);
 
-  // 跟踪帧或主路径未出 mask：MagicTouch 修边
+  // 主路径未出 mask：MagicTouch 修边（不复用过期显著性，避免镜头移动后冻在旧位置）
   if (primary && primary.bbox) {
     const seed = seedFromSubject(primary, canvas.width, canvas.height);
     if (!mask) {
-      // 风景跟踪帧可复用上次显著性连通域（若种子仍落在内）
-      if (
-        mode === "landscape" &&
-        lastSaliencyMask &&
-        !needDetect
-      ) {
-        const hit = primaryFromMask(
-          lastSaliencyMask,
-          canvas.width,
-          canvas.height,
-          "subject",
-          seed
-        );
-        if (hit && boxIoU(hit.bbox, primary.bbox) >= 0.15) {
-          mask = hit.mask;
-          primary = {
-            label: primary.label,
-            score: Math.max(primary.score, hit.score),
-            bbox: hit.bbox.slice(),
-          };
-        }
-      }
-      if (!mask) {
-        mask = segmentSubjectMask(canvas, seed.nx, seed.ny);
-      }
+      mask = segmentSubjectMask(canvas, seed.nx, seed.ny);
     }
     if (mask) {
       const refined = finalizeSingleSubjectMask(
@@ -1465,6 +1516,7 @@ export async function detectSubjects(source, onProgress, options) {
         }
         if (pinnedSubject && pinnedSubject.bbox) {
           pinnedSubject.bbox = refined.bbox.slice();
+          syncPinCenterFromBbox(refined.bbox, canvas.width, canvas.height);
         }
       }
     }
@@ -1920,6 +1972,7 @@ export function pickPrimarySubject(objects, imgW, imgH, mode, canvas) {
     pinnedSubject.bbox = best.bbox.slice();
     pinnedSubject.label = best.label;
     pinnedSubject.score = best.score;
+    syncPinCenterFromBbox(best.bbox, imgW, imgH);
   }
 
   return best;
@@ -1990,8 +2043,8 @@ export function stabilizeSubject(next, imgW, imgH, mode) {
   const areaDelta =
     Math.abs(nextArea - prevArea) / Math.max(prevArea, 1);
 
-  // 轻微晃动：框基本不动，但不要过死以免锁死旧主体
-  if (iou >= 0.62 && shift < 0.035 && areaDelta < 0.14) {
+  // 极小抖动才钉住；镜头平移时加快跟随
+  if (iou >= 0.7 && shift < 0.018 && areaDelta < 0.1) {
     trackedSubject = {
       label: next.label || trackedSubject.label,
       score: next.score,
@@ -2000,30 +2053,19 @@ export function stabilizeSubject(next, imgW, imgH, mode) {
     return trackedSubject;
   }
 
-  // 同主体缓动
+  let t = 0.55;
   if (iou >= 0.28) {
-    const t = iou >= 0.5 && shift < 0.07 ? 0.1 : 0.22;
-    trackedSubject = {
-      label: next.label || trackedSubject.label,
-      score: next.score,
-      bbox: lerpBox(trackedSubject.bbox, next.bbox, t),
-    };
-    return trackedSubject;
-  }
-
-  if (iou >= 0.12) {
-    trackedSubject = {
-      label: next.label || trackedSubject.label,
-      score: next.score,
-      bbox: lerpBox(trackedSubject.bbox, next.bbox, 0.4),
-    };
-    return trackedSubject;
+    t = shift > 0.035 ? Math.min(0.82, 0.5 + shift * 5) : iou >= 0.5 ? 0.28 : 0.4;
+  } else if (iou >= 0.12) {
+    t = shift > 0.035 ? 0.7 : 0.5;
+  } else {
+    t = 0.85;
   }
 
   trackedSubject = {
-    label: next.label,
+    label: next.label || trackedSubject.label,
     score: next.score,
-    bbox: next.bbox.slice(),
+    bbox: lerpBox(trackedSubject.bbox, next.bbox, t),
   };
   return trackedSubject;
 }
