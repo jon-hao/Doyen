@@ -13,7 +13,7 @@
   <meta name="apple-mobile-web-app-title" content="Doyen" />
   <meta name="application-name" content="Doyen" />
   <meta name="theme-color" content="#1a1a1a" />
-  <meta name="doyen-app-version" content="0.106" />
+  <meta name="doyen-app-version" content="0.107" />
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
   <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png" />
@@ -503,64 +503,6 @@
       text-align: center;
     }
 
-    #autoRescanBtn {
-      margin: 4px 0 0;
-      padding: 0;
-      border: 0;
-      background: transparent;
-      color: rgba(255, 255, 255, 0.42);
-      font-size: 9px;
-      line-height: 1.2;
-      letter-spacing: 0.02em;
-      cursor: pointer;
-      display: none;
-    }
-    #autoRescanBtn.show {
-      display: block;
-    }
-    #autoRescanBtn.on {
-      color: rgba(74, 222, 128, 0.75);
-    }
-
-    /* 锁定态角标：取景顶部居中，不挡构图框 */
-    #lockBadge {
-      position: absolute;
-      top: calc(12px + var(--safe-top));
-      left: 50%;
-      transform: translateX(-50%);
-      z-index: 5;
-      pointer-events: none;
-      padding: 5px 12px;
-      border-radius: 999px;
-      font-size: 11px;
-      letter-spacing: 0.06em;
-      color: rgba(255, 255, 255, 0.92);
-      background: rgba(0, 0, 0, 0.42);
-      border: 1px solid rgba(74, 222, 128, 0.35);
-      opacity: 0;
-      transition: opacity 0.2s ease;
-      white-space: nowrap;
-    }
-    #lockBadge.show {
-      opacity: 1;
-    }
-    #lockBadge[data-state="locked"] {
-      border-color: rgba(74, 222, 128, 0.55);
-      color: #bbf7d0;
-    }
-    #lockBadge[data-state="holding"] {
-      border-color: rgba(250, 204, 21, 0.45);
-      color: #fde68a;
-    }
-    #lockBadge[data-state="searching"] {
-      border-color: rgba(255, 255, 255, 0.22);
-      color: rgba(255, 255, 255, 0.7);
-    }
-    #lockBadge[data-state="lost"] {
-      border-color: rgba(239, 68, 68, 0.45);
-      color: #fecaca;
-    }
-
     #subjectOverlay {
       position: absolute;
       inset: 0;
@@ -628,89 +570,119 @@
       border: 8px solid rgba(239, 68, 68, 0.45);
       border-radius: 0;
       box-sizing: border-box;
-      transition: border-color 0.25s ease;
       pointer-events: none;
+      --comp-r: 239;
+      --comp-g: 68;
+      --comp-b: 68;
+      border-color: rgba(var(--comp-r), var(--comp-g), var(--comp-b), 0.45);
+      animation: compFrameBreathe 2.6s ease-in-out infinite;
+    }
+    #compFrame.grade-s {
+      --comp-r: 74;
+      --comp-g: 222;
+      --comp-b: 128;
+    }
+    #compFrame.grade-a {
+      --comp-r: 250;
+      --comp-g: 204;
+      --comp-b: 21;
+    }
+    #compFrame.grade-c {
+      --comp-r: 239;
+      --comp-g: 68;
+      --comp-b: 68;
+    }
+    @keyframes compFrameBreathe {
+      0%,
+      100% {
+        border-color: rgba(var(--comp-r), var(--comp-g), var(--comp-b), 0.35);
+        box-shadow: inset 0 0 28px rgba(var(--comp-r), var(--comp-g), var(--comp-b), 0.06);
+      }
+      50% {
+        border-color: rgba(var(--comp-r), var(--comp-g), var(--comp-b), 0.55);
+        box-shadow: inset 0 0 40px rgba(var(--comp-r), var(--comp-g), var(--comp-b), 0.12);
+      }
     }
     .comp-corner {
       position: absolute;
-      width: 52px;
-      height: 52px;
+      width: 64px;
+      height: 64px;
       pointer-events: none;
     }
     .comp-corner.tl {
-      left: 10px;
-      top: calc(10px + var(--safe-top));
+      left: 6px;
+      top: calc(6px + var(--safe-top));
     }
     .comp-corner.tr {
-      right: 10px;
-      top: calc(10px + var(--safe-top));
+      right: 6px;
+      top: calc(6px + var(--safe-top));
     }
     .comp-corner.bl {
-      left: 10px;
-      bottom: calc(120px + var(--safe-bottom));
+      left: 6px;
+      bottom: calc(116px + var(--safe-bottom));
     }
     .comp-corner.br {
-      right: 10px;
-      bottom: calc(120px + var(--safe-bottom));
+      right: 6px;
+      bottom: calc(116px + var(--safe-bottom));
     }
     .comp-arrow {
       position: absolute;
-      width: 22px;
-      height: 22px;
+      width: 36px;
+      height: 36px;
       display: none;
       place-items: center;
-      font-size: 16px;
+      font-size: 30px;
       line-height: 1;
-      color: rgba(255, 255, 255, 0.38);
-      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
+      color: rgba(255, 255, 255, 0.55);
+      text-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
       opacity: 0;
     }
     .comp-arrow.show {
       display: grid;
-      opacity: 0.55;
-      animation: compCornerPulse 1s ease-in-out infinite;
+      opacity: 0.88;
+      animation: compCornerPulse 0.95s ease-in-out infinite;
     }
     .comp-corner.tl .comp-arrow[data-dir="up"] {
-      left: 22px;
+      left: 26px;
       top: 0;
     }
     .comp-corner.tl .comp-arrow[data-dir="left"] {
       left: 0;
-      top: 22px;
+      top: 26px;
     }
     .comp-corner.tr .comp-arrow[data-dir="up"] {
-      right: 22px;
+      right: 26px;
       top: 0;
     }
     .comp-corner.tr .comp-arrow[data-dir="right"] {
       right: 0;
-      top: 22px;
+      top: 26px;
     }
     .comp-corner.bl .comp-arrow[data-dir="down"] {
-      left: 22px;
+      left: 26px;
       bottom: 0;
     }
     .comp-corner.bl .comp-arrow[data-dir="left"] {
       left: 0;
-      bottom: 22px;
+      bottom: 26px;
     }
     .comp-corner.br .comp-arrow[data-dir="down"] {
-      right: 22px;
+      right: 26px;
       bottom: 0;
     }
     .comp-corner.br .comp-arrow[data-dir="right"] {
       right: 0;
-      bottom: 22px;
+      bottom: 26px;
     }
     @keyframes compCornerPulse {
       0%,
       100% {
-        opacity: 0.35;
+        opacity: 0.72;
         transform: scale(1);
       }
       50% {
-        opacity: 0.7;
-        transform: scale(1.14);
+        opacity: 1;
+        transform: scale(1.2);
       }
     }
     #compFocalHint {
@@ -851,7 +823,6 @@
         <div id="compFocalHint"></div>
       </div>
       <div id="levelHint" aria-hidden="true">请调整手机角度，保持画面水平</div>
-      <div id="lockBadge" aria-hidden="true"></div>
     </div>
     <div id="review" aria-hidden="true">
       <img id="reviewImg" alt="预览" />
@@ -879,7 +850,6 @@
           <div id="coachSlot">
             <button id="coachBtn" type="button" aria-label="辅助拍摄" disabled>辅助拍摄</button>
             <p id="coachHint"></p>
-            <button id="autoRescanBtn" type="button" aria-pressed="true">自动重搜 · 开</button>
           </div>
           <button id="shutter" type="button" aria-label="拍照" disabled></button>
           <button id="flipBtn" type="button" aria-label="切换摄像头" disabled>⟲</button>
@@ -905,7 +875,7 @@
   <script>
     (function () {
       /** 与 version.json 同步；发版时两处一起改 */
-      const APP_VERSION = "0.106";
+      const APP_VERSION = "0.107";
       const VERSION_RELOAD_KEY = "doyen_reload_for";
 
       async function checkAppVersionAndUpdate() {
@@ -955,8 +925,6 @@
       const flipBtn = document.getElementById("flipBtn");
       const coachBtn = document.getElementById("coachBtn");
       const coachHint = document.getElementById("coachHint");
-      const autoRescanBtn = document.getElementById("autoRescanBtn");
-      const lockBadge = document.getElementById("lockBadge");
       const subjectOverlay = document.getElementById("subjectOverlay");
       const tapFocus = document.getElementById("tapFocus");
       const compGuide = document.getElementById("compGuide");
@@ -2117,54 +2085,6 @@
         if (coachHint) coachHint.textContent = text || "";
       }
 
-      const AUTO_RESCAN_KEY = "doyen_auto_rescan";
-      let autoRescanOn = true;
-      try {
-        const saved = localStorage.getItem(AUTO_RESCAN_KEY);
-        if (saved === "0") autoRescanOn = false;
-        if (saved === "1") autoRescanOn = true;
-      } catch (_) {}
-
-      function syncAutoRescanBtn() {
-        if (!autoRescanBtn) return;
-        autoRescanBtn.textContent = autoRescanOn
-          ? "自动重搜 · 开"
-          : "自动重搜 · 关";
-        autoRescanBtn.classList.toggle("on", autoRescanOn);
-        autoRescanBtn.setAttribute("aria-pressed", autoRescanOn ? "true" : "false");
-      }
-
-      function setAutoRescanVisible(show) {
-        if (!autoRescanBtn) return;
-        autoRescanBtn.classList.toggle("show", !!show);
-        syncAutoRescanBtn();
-      }
-
-      function setLockBadge(state, pinned) {
-        if (!lockBadge) return;
-        const map = {
-          locked: pinned ? "已锁定主体" : "跟踪主体中",
-          holding: "保持中…",
-          searching: "寻找主体",
-          lost: autoRescanOn ? "丢失 · 即将重搜" : "主体已丢失",
-        };
-        if (!state || !map[state]) {
-          lockBadge.classList.remove("show");
-          lockBadge.textContent = "";
-          lockBadge.removeAttribute("data-state");
-          lockBadge.setAttribute("aria-hidden", "true");
-          return;
-        }
-        lockBadge.dataset.state = state;
-        lockBadge.textContent = map[state];
-        lockBadge.classList.add("show");
-        lockBadge.setAttribute("aria-hidden", "false");
-      }
-
-      function hideLockBadge() {
-        setLockBadge(null);
-      }
-
       function setCoachBtnProgress(pct) {
         const p = Math.max(0, Math.min(100, Number(pct) || 0));
         coachBtn.style.setProperty("--coach-progress", p.toFixed(1) + "%");
@@ -2376,14 +2296,10 @@
         compGuide.classList.add("show");
         compGuide.setAttribute("aria-hidden", "false");
         if (compFrame) {
-          const a = "0.45";
-          if (guide.grade === "S") {
-            compFrame.style.borderColor = "rgba(74, 222, 128, " + a + ")";
-          } else if (guide.grade === "A") {
-            compFrame.style.borderColor = "rgba(250, 204, 21, " + a + ")";
-          } else {
-            compFrame.style.borderColor = "rgba(239, 68, 68, " + a + ")";
-          }
+          compFrame.classList.remove("grade-s", "grade-a", "grade-c");
+          if (guide.grade === "S") compFrame.classList.add("grade-s");
+          else if (guide.grade === "A") compFrame.classList.add("grade-a");
+          else compFrame.classList.add("grade-c");
         }
 
         const dirs = ["up", "down", "left", "right"];
@@ -2849,6 +2765,7 @@
       }
 
       function drawSubjectContour(mask, bbox, srcW, srcH, lockVisual) {
+        void lockVisual;
         sizeSubjectOverlay();
         const ctx = subjectOverlay.getContext("2d");
         if (!ctx) return;
@@ -2856,24 +2773,9 @@
         const oh = subjectOverlay.height;
         ctx.clearRect(0, 0, ow, oh);
 
-        const visual = lockVisual || "locked";
-        let stroke = "rgba(74, 222, 128, 0.92)";
-        let fillA = 52;
-        let lineW = Math.max(2.5, Math.round(ow / 150));
-        let dashed = false;
-        if (visual === "holding") {
-          stroke = "rgba(250, 204, 21, 0.78)";
-          fillA = 28;
-          lineW = Math.max(2, Math.round(ow / 170));
-          dashed = true;
-        } else if (visual === "searching") {
-          stroke = "rgba(74, 222, 128, 0.7)";
-          fillA = 40;
-        } else if (visual === "locked") {
-          stroke = "rgba(74, 222, 128, 0.98)";
-          fillA = 58;
-          lineW = Math.max(2.8, Math.round(ow / 140));
-        }
+        const stroke = "rgba(74, 222, 128, 0.94)";
+        const fillA = 54;
+        const lineW = Math.max(3.2, Math.round(ow / 125));
 
         const scale = Math.max(ow / srcW, oh / srcH);
         const dw = srcW * scale;
@@ -2902,15 +2804,9 @@
             const o = i * 4;
             if (src[i] > 0) {
               onCount += 1;
-              if (visual === "holding") {
-                px[o] = 250;
-                px[o + 1] = 204;
-                px[o + 2] = 21;
-              } else {
-                px[o] = 74;
-                px[o + 1] = 222;
-                px[o + 2] = 128;
-              }
+              px[o] = 74;
+              px[o + 1] = 222;
+              px[o + 2] = 128;
               px[o + 3] = fillA;
             }
           }
@@ -2923,14 +2819,17 @@
             tmp.getContext("2d").putImageData(img, 0, 0);
             ctx.save();
             ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = "high";
             ctx.drawImage(tmp, ox, oy, dw, dh);
 
+            ctx.filter = "blur(0.45px)";
+            ctx.shadowColor = "rgba(74, 222, 128, 0.55)";
+            ctx.shadowBlur = Math.max(2, lineW * 0.85);
             ctx.beginPath();
             ctx.strokeStyle = stroke;
             ctx.lineWidth = lineW;
             ctx.lineJoin = "round";
             ctx.lineCap = "round";
-            if (dashed) ctx.setLineDash([6, 5]);
             for (let y = 0; y < mh; y++) {
               for (let x = 0; x < mw; x++) {
                 if (!isMaskEdge(src, mw, mh, x, y)) continue;
@@ -2955,7 +2854,8 @@
               }
             }
             ctx.stroke();
-            ctx.setLineDash([]);
+            ctx.filter = "none";
+            ctx.shadowBlur = 0;
             ctx.restore();
             return;
           }
@@ -2976,17 +2876,16 @@
         ctx.beginPath();
         if (ctx.roundRect) ctx.roundRect(x, y, bw, bh, r);
         else ctx.rect(x, y, bw, bh);
-        ctx.fillStyle =
-          visual === "holding"
-            ? "rgba(250, 204, 21, 0.16)"
-            : "rgba(74, 222, 128, 0.22)";
+        ctx.fillStyle = "rgba(74, 222, 128, 0.22)";
         ctx.fill();
         ctx.strokeStyle = stroke;
-        ctx.lineWidth = Math.max(2, Math.round(ow / 180));
+        ctx.lineWidth = Math.max(3, Math.round(ow / 150));
         ctx.lineJoin = "round";
-        if (dashed) ctx.setLineDash([7, 5]);
+        ctx.lineCap = "round";
+        ctx.shadowColor = "rgba(74, 222, 128, 0.5)";
+        ctx.shadowBlur = Math.max(2, lineW * 0.7);
         ctx.stroke();
-        ctx.setLineDash([]);
+        ctx.shadowBlur = 0;
         ctx.restore();
       }
 
@@ -3015,8 +2914,6 @@
         clearSubjectOverlay();
         hideCompositionGuide();
         clearStableMask();
-        hideLockBadge();
-        setAutoRescanVisible(false);
         setCoachHint("");
         if (coachEngine && coachEngine.clearTrackedSubject) {
           coachEngine.clearTrackedSubject();
@@ -3039,9 +2936,6 @@
         coachTracking = true;
         let lastMask = null;
         let lastSubject = null;
-        let lostHintUntil = 0;
-        let lostSince = 0;
-        let lastBadgeState = "";
         while (coachActive && gen === coachDetectGen) {
           if (!stream || document.hidden) {
             await new Promise(function (r) { setTimeout(r, 400); });
@@ -3053,7 +2947,6 @@
             forceDetect = true;
             lastMask = null;
             lastSubject = null;
-            lostSince = 0;
             clearStableMask();
             if (coachHardReset) {
               coachHardReset = false;
@@ -3095,74 +2988,26 @@
             lastTapSize = { w: snap.srcW, h: snap.srcH };
 
             const state = vision.lockState || "searching";
-            const pinnedNow = !!(
-              coachEngine.getAssistLockState &&
-              coachEngine.getAssistLockState().pinned
-            );
-            const drawVisual =
-              state === "holding"
-                ? "holding"
-                : state === "locked"
-                  ? "locked"
-                  : "searching";
-
-            if (state !== lastBadgeState) {
-              setLockBadge(state, pinnedNow);
-              lastBadgeState = state;
-            } else if (state === "locked") {
-              setLockBadge(state, pinnedNow);
-            }
 
             if (subject && subject.bbox) {
               lastSubject = subject;
-              lostSince = 0;
               drawSubjectContour(
                 lastMask,
                 subject.bbox,
                 snap.srcW,
-                snap.srcH,
-                drawVisual
+                snap.srcH
               );
-              if (state === "locked" || state === "holding") {
-                if (Date.now() > lostHintUntil) setCoachHint("");
-              }
             } else if (state === "holding" && lastSubject && lastSubject.bbox) {
               drawSubjectContour(
                 lastMask,
                 lastSubject.bbox,
                 snap.srcW,
-                snap.srcH,
-                "holding"
+                snap.srcH
               );
             } else {
               lastMask = null;
               lastSubject = null;
               clearSubjectOverlay();
-              if (state === "lost") {
-                if (!lostSince) lostSince = Date.now();
-                lostHintUntil = Date.now() + 1600;
-                setCoachHint(
-                  autoRescanOn
-                    ? "主体丢失，正在重新寻找…"
-                    : "主体已丢失，点画面重新选定"
-                );
-                // 自动重搜：短暂等待后清 pin 并强制检测
-                if (
-                  autoRescanOn &&
-                  Date.now() - lostSince >= 1100 &&
-                  !coachReanalyzeSoon
-                ) {
-                  if (coachEngine.clearPinnedSubject) {
-                    coachEngine.clearPinnedSubject();
-                  }
-                  coachReanalyzeSoon = true;
-                  coachHardReset = false;
-                  lostSince = 0;
-                  setCoachHint("重新寻找主体…");
-                }
-              } else {
-                lostSince = 0;
-              }
             }
 
             if (modeNow === "landscape") {
@@ -3188,7 +3033,6 @@
             if (viewGen === coachViewGen) {
               clearSubjectOverlay();
               hideCompositionGuide();
-              hideLockBadge();
             }
           }
           const elapsed = Date.now() - started;
@@ -3205,8 +3049,6 @@
         coachActive = true;
         coachBtn.classList.add("active");
         setCoachHint("");
-        setAutoRescanVisible(true);
-        setLockBadge("searching", false);
         sizeSubjectOverlay();
         ensureMotionSensors().catch(function () {});
         ensureCompositionCoach().catch(function () {});
@@ -3375,8 +3217,7 @@
               mask || vision.mask,
               drawBox,
               snap.srcW,
-              snap.srcH,
-              "locked"
+              snap.srcH
             );
             if (shootMode === "landscape") {
               updateCompositionGuide(pinned, snap.srcW, snap.srcH, {
@@ -3443,28 +3284,6 @@
         coachBtn.classList.remove("pressed");
       });
       coachBtn.addEventListener("click", onCoachClick);
-      if (autoRescanBtn) {
-        syncAutoRescanBtn();
-        autoRescanBtn.addEventListener("click", function (ev) {
-          ev.preventDefault();
-          ev.stopPropagation();
-          autoRescanOn = !autoRescanOn;
-          try {
-            localStorage.setItem(AUTO_RESCAN_KEY, autoRescanOn ? "1" : "0");
-          } catch (_) {}
-          syncAutoRescanBtn();
-          if (coachActive) {
-            setCoachHint(
-              autoRescanOn
-                ? "已开启丢失后自动重搜"
-                : "已关闭自动重搜，丢失后请点选"
-            );
-            window.setTimeout(function () {
-              if (coachActive) setCoachHint("");
-            }, 1400);
-          }
-        });
-      }
       if (stageEl) {
         stageEl.addEventListener("pointerdown", onStagePointerDown, {
           passive: true,
