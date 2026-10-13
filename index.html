@@ -13,7 +13,7 @@
   <meta name="apple-mobile-web-app-title" content="Doyen" />
   <meta name="application-name" content="Doyen" />
   <meta name="theme-color" content="#1a1a1a" />
-  <meta name="doyen-app-version" content="0.109" />
+  <meta name="doyen-app-version" content="0.110" />
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
   <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png" />
@@ -855,7 +855,7 @@
   <script>
     (function () {
       /** 与 version.json 同步；发版时两处一起改 */
-      const APP_VERSION = "0.109";
+      const APP_VERSION = "0.110";
       const VERSION_RELOAD_KEY = "doyen_reload_for";
 
       async function checkAppVersionAndUpdate() {
@@ -2729,8 +2729,8 @@
           (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter;
         const iou = uni > 0 ? inter / uni : 0;
 
-        // 仅在几乎重叠且中心几乎不动时冻住；否则立刻更新，避免缩成绿点
-        if (iou >= 0.88 && shift < 0.04) {
+        // 仅在几乎重叠且中心几乎不动时冻住；镜头一动立刻换新掩码
+        if (iou >= 0.92 && shift < 0.02) {
           stableMaskHold += 1;
           return stableMask;
         }
@@ -2906,16 +2906,13 @@
         coachTracking = true;
         let lastMask = null;
         let lastSubject = null;
-        let lostHintUntil = 0;
         while (coachActive && gen === coachDetectGen) {
           if (!stream || document.hidden) {
             await new Promise(function (r) { setTimeout(r, 400); });
             continue;
           }
-          let forceDetect = false;
           if (coachReanalyzeSoon) {
             coachReanalyzeSoon = false;
-            forceDetect = true;
             lastMask = null;
             lastSubject = null;
             clearStableMask();
@@ -2939,10 +2936,11 @@
             if (coachEngine.setHoldOrientation) {
               coachEngine.setHoldOrientation(holdNow);
             }
+            // 每帧强制完整重识别，绿框随镜头更新
             const vision = await coachEngine.detectSubjects(snap.canvas, null, {
               mode: modeNow,
               holdOrientation: holdNow,
-              forceDetect: forceDetect,
+              forceDetect: true,
             });
             if (!coachActive || gen !== coachDetectGen) break;
             if (viewGen !== coachViewGen) continue;
@@ -2962,19 +2960,12 @@
             if (subject && subject.bbox) {
               lastSubject = subject;
               drawSubjectContour(lastMask, subject.bbox, snap.srcW, snap.srcH);
-              if (state === "locked" || state === "holding") {
-                if (Date.now() > lostHintUntil) setCoachHint("");
-              }
             } else if (state === "holding" && lastSubject && lastSubject.bbox) {
               drawSubjectContour(lastMask, lastSubject.bbox, snap.srcW, snap.srcH);
             } else {
               lastMask = null;
               lastSubject = null;
               clearSubjectOverlay();
-              if (state === "lost") {
-                lostHintUntil = Date.now() + 1200;
-                setCoachHint("主体已丢失，点画面重新选定");
-              }
             }
 
             if (modeNow === "landscape") {
@@ -3003,8 +2994,7 @@
             }
           }
           const elapsed = Date.now() - started;
-          // 跟踪帧更快轮询；完整检测由引擎内部节流（保留点击独占，不每帧 forceDetect）
-          const wait = coachReanalyzeSoon ? 0 : Math.max(0, 55 - elapsed);
+          const wait = coachReanalyzeSoon ? 0 : Math.max(0, 40 - elapsed);
           await new Promise(function (r) { setTimeout(r, wait); });
         }
         if (gen === coachDetectGen) {
