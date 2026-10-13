@@ -97,9 +97,30 @@ const POWER_POINTS = [
 
 const GRADE_A = 0.48;
 const GRADE_S = 0.72;
+/** 升降档迟滞：手持微抖时避免红黄绿来回跳 */
+const GRADE_HYST = 0.07;
+/** 评分 EMA，抑制帧间噪声 */
+const SCORE_EMA = 0.28;
+/** 主体中心 EMA，箭头/构图对微抖不敏感 */
+const CENTER_EMA = 0.35;
+/** 箭头死区（归一化画面坐标）；越大越不苛刻 */
+const ARROW_DEAD = 0.09;
+/** 箭头强度爬升区间 */
+const ARROW_SPAN = 0.28;
+/** 箭头显示/隐藏迟滞 */
+const ARROW_ON = 0.32;
+const ARROW_OFF = 0.18;
 
 /** @type {HTMLCanvasElement|null} */
 let scratchCanvas = null;
+/** @type {number|null} */
+let smoothScore = null;
+/** @type {"B"|"A"|"S"|null} */
+let stickyGrade = null;
+/** @type {{x:number,y:number}|null} */
+let smoothCenter = null;
+/** @type {{up:boolean,down:boolean,left:boolean,right:boolean}} */
+let stickyArrows = { up: false, down: false, left: false, right: false };
 
 function clamp01(v) {
   return Math.max(0, Math.min(1, v));
@@ -109,6 +130,50 @@ function gradeFromScore(score) {
   if (score >= GRADE_S) return "S";
   if (score >= GRADE_A) return "A";
   return "B";
+}
+
+/** 带迟滞的档位：升档要更够分，降档要明显掉分 */
+function gradeFromScoreSticky(score) {
+  const raw = gradeFromScore(score);
+  if (!stickyGrade) {
+    stickyGrade = raw;
+    return stickyGrade;
+  }
+  const prev = stickyGrade;
+  if (prev === "S") {
+    if (score < GRADE_S - GRADE_HYST) {
+      stickyGrade = score >= GRADE_A - GRADE_HYST * 0.5 ? "A" : "B";
+    }
+  } else if (prev === "A") {
+    if (score >= GRADE_S + GRADE_HYST * 0.35) stickyGrade = "S";
+    else if (score < GRADE_A - GRADE_HYST) stickyGrade = "B";
+  } else {
+    if (score >= GRADE_S) stickyGrade = "S";
+    else if (score >= GRADE_A + GRADE_HYST) stickyGrade = "A";
+  }
+  return stickyGrade;
+}
+
+function smoothArrowFlags(strengths) {
+  const dirs = ["up", "down", "left", "right"];
+  const out = { up: 0, down: 0, left: 0, right: 0 };
+  for (let i = 0; i < dirs.length; i++) {
+    const d = dirs[i];
+    const s = strengths[d] || 0;
+    const was = !!stickyArrows[d];
+    const on = was ? s >= ARROW_OFF : s >= ARROW_ON;
+    stickyArrows[d] = on;
+    out[d] = on ? Math.max(s, ARROW_ON) : 0;
+  }
+  return out;
+}
+
+/** 关闭辅助 / 隐藏引导时重置迟滞状态 */
+export function resetCompositionGuideState() {
+  smoothScore = null;
+  stickyGrade = null;
+  smoothCenter = null;
+  stickyArrows = { up: false, down: false, left: false, right: false };
 }
 
 function boxCenter(b) {
@@ -614,8 +679,19 @@ export function evaluateLandscapeComposition(subject, imgW, imgH, options) {
   if (hasSubject) {
     const b = subject.bbox;
     const c = boxCenter(b);
-    nx = c.x / imgW;
-    ny = c.y / imgH;
+    const rawNx = c.x / imgW;
+    const rawNy = c.y / imgH;
+    if (!smoothCenter) {
+      smoothCenter = { x: rawNx, y: rawNy };
+    } else {
+      const a = CENTER_EMA;
+      smoothCenter = {
+        x: smoothCenter.x * (1 - a) + rawNx * a,
+        y: smoothCenter.y * (1 - a) + rawNy * a,
+      };
+    }
+    nx = smoothCenter.x;
+    ny = smoothCenter.y;
     areaRatio = boxAreaRatio(b, imgW, imgH);
     completeness = boxCompleteness(b, imgW, imgH);
     const rot = scoreRuleOfThirds(nx, ny);
@@ -623,6 +699,8 @@ export function evaluateLandscapeComposition(subject, imgW, imgH, options) {
     placement = Math.max(rot, cen * 0.92);
     size = scoreSize(areaRatio);
     balance = scoreVisualBalance(nx, ny, areaRatio);
+  } else {
+    smoothCenter = null;
   }
 
   const presence = scoreSubjectPresence(subject, areaRatio);
@@ -667,8 +745,11 @@ export function evaluateLandscapeComposition(subject, imgW, imgH, options) {
   }
   gateMul *= multiSubjectGate(opts.objects, subject, imgW, imgH);
 
-  const score = composeWeightedScore(factors, gateMul, hasSubject);
-  const grade = gradeFromScore(score);
+  const rawScore = composeWeightedScore(factors, gateMul, hasSubject);
+  if (smoothScore == null) smoothScore = rawScore;
+  else smoothScore = smoothScore * (1 - SCORE_EMA) + rawScore * SCORE_EMA;
+  const score = smoothScore;
+  const grade = gradeFromScoreSticky(score);
 
   let borderColor = "rgba(239, 68, 68, 0.72)";
   if (grade === "S") borderColor = "rgba(74, 222, 128, 0.75)";
@@ -693,16 +774,26 @@ export function evaluateLandscapeComposition(subject, imgW, imgH, options) {
   );
   const potentialGrade = gradeFromScore(potentialScore);
 
-  const arrows = { up: 0, down: 0, left: 0, right: 0 };
+  const arrowStrength = { up: 0, down: 0, left: 0, right: 0 };
   if (hasSubject) {
     const ex = nx - target.x;
     const ey = ny - target.y;
-    const dead = 0.035;
-    if (ex > dead) arrows.right = clamp01((ex - dead) / 0.22);
-    if (ex < -dead) arrows.left = clamp01((-ex - dead) / 0.22);
-    if (ey > dead) arrows.down = clamp01((ey - dead) / 0.22);
-    if (ey < -dead) arrows.up = clamp01((-ey - dead) / 0.22);
+    if (ex > ARROW_DEAD) {
+      arrowStrength.right = clamp01((ex - ARROW_DEAD) / ARROW_SPAN);
+    }
+    if (ex < -ARROW_DEAD) {
+      arrowStrength.left = clamp01((-ex - ARROW_DEAD) / ARROW_SPAN);
+    }
+    if (ey > ARROW_DEAD) {
+      arrowStrength.down = clamp01((ey - ARROW_DEAD) / ARROW_SPAN);
+    }
+    if (ey < -ARROW_DEAD) {
+      arrowStrength.up = clamp01((-ey - ARROW_DEAD) / ARROW_SPAN);
+    }
+  } else {
+    stickyArrows = { up: false, down: false, left: false, right: false };
   }
+  const arrows = smoothArrowFlags(arrowStrength);
 
   const focal = suggestFocalForSubject(
     areaRatio,
