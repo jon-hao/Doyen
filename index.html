@@ -13,7 +13,7 @@
   <meta name="apple-mobile-web-app-title" content="Doyen" />
   <meta name="application-name" content="Doyen" />
   <meta name="theme-color" content="#1a1a1a" />
-  <meta name="doyen-app-version" content="0.115" />
+  <meta name="doyen-app-version" content="0.116" />
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
   <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png" />
@@ -933,7 +933,7 @@
   <script>
     (function () {
       /** 与 version.json 同步；发版时两处一起改 */
-      const APP_VERSION = "0.115";
+      const APP_VERSION = "0.116";
       const VERSION_RELOAD_KEY = "doyen_reload_for";
 
       async function checkAppVersionAndUpdate() {
@@ -2383,7 +2383,7 @@
       }
 
       function updateCompositionGuide(subject, srcW, srcH, extras) {
-        if (!compGuide || !coachActive || shootMode !== "landscape") {
+        if (!compGuide || !coachActive) {
           hideCompositionGuide();
           return;
         }
@@ -2392,13 +2392,14 @@
           return;
         }
         const ex = extras || {};
+        const presets = currentPresets();
         const guide = compositionCoach.evaluateLandscapeComposition(
           subject || null,
           srcW,
           srcH,
           {
             currentZoom: zoomFactor,
-            focals: MODE_PRESETS.landscape.focals,
+            focals: presets.focals,
             canvas: ex.canvas || null,
             objects: ex.objects || [],
             tiltDeg: motionTiltDeg,
@@ -2423,10 +2424,12 @@
           }
         }
 
+        // 绿档：强制隐藏箭头与换焦（含粘滞提示）
+        const silentGreen = guide.grade === "S";
         const dirs = ["up", "down", "left", "right"];
         for (let i = 0; i < dirs.length; i++) {
           const dir = dirs[i];
-          const strength = guide.arrows[dir] || 0;
+          const strength = silentGreen ? 0 : guide.arrows[dir] || 0;
           const on = strength >= 0.18;
           const el = compGuide.querySelector(
             '#compArrows .comp-arrow[data-dir="' + dir + '"]'
@@ -2436,7 +2439,17 @@
 
         if (compFocalHint) {
           const now = Date.now();
-          if (guide.needFocalChange) {
+          if (silentGreen) {
+            stickyFocalHint = null;
+            lastFocalHintKey = "";
+            focalHintHideAfter = 0;
+            compFocalHint.classList.remove("show");
+            compFocalHint.textContent = "";
+            setFocalSuggestHighlight(null);
+          } else if (
+            guide.needFocalChange &&
+            Math.abs((guide.suggestedZoom || 0) - zoomFactor) > 0.08
+          ) {
             focalHintHideAfter = 0;
             const key =
               guide.suggestedName +
@@ -2491,8 +2504,15 @@
               compFocalHint.classList.add("show");
             }
           } else if (stickyFocalHint) {
-            if (now < stickyFocalHint.holdUntil) {
-              // 最短 3 秒内强制继续显示
+            if (Math.abs(stickyFocalHint.zoom - zoomFactor) <= 0.08) {
+              // 已在建议焦段：立刻闭嘴
+              stickyFocalHint = null;
+              lastFocalHintKey = "";
+              focalHintHideAfter = 0;
+              compFocalHint.classList.remove("show");
+              setFocalSuggestHighlight(null);
+            } else if (now < stickyFocalHint.holdUntil) {
+              // 最短展示窗内继续显示
               compFocalHint.textContent =
                 "建议切换至 " +
                 stickyFocalHint.name +
@@ -3160,6 +3180,7 @@
           ensurePreviewFullscreen();
           try {
             const snap = captureDetectCanvas();
+            ensurePreviewFullscreen();
             if (!coachEngine || !coachEngine.detectSubjects) {
               throw new Error("引擎未就绪");
             }
@@ -3198,24 +3219,20 @@
               clearSubjectOverlay();
             }
 
-            if (modeNow === "landscape") {
-              if (!compositionCoach) {
-                try {
-                  await ensureCompositionCoach();
-                } catch (_) {}
-              }
-              updateCompositionGuide(
-                subject || (state === "holding" ? lastSubject : null),
-                snap.srcW,
-                snap.srcH,
-                {
-                  canvas: snap.canvas,
-                  objects: vision.objects || [],
-                }
-              );
-            } else {
-              hideCompositionGuide();
+            if (!compositionCoach) {
+              try {
+                await ensureCompositionCoach();
+              } catch (_) {}
             }
+            updateCompositionGuide(
+              subject || (state === "holding" ? lastSubject : null),
+              snap.srcW,
+              snap.srcH,
+              {
+                canvas: snap.canvas,
+                objects: vision.objects || [],
+              }
+            );
           } catch (_) {
             if (!coachActive || gen !== coachDetectGen) break;
             if (viewGen === coachViewGen) {
@@ -3408,12 +3425,10 @@
               snap.srcW,
               snap.srcH
             );
-            if (shootMode === "landscape") {
-              updateCompositionGuide(pinned, snap.srcW, snap.srcH, {
-                canvas: snap.canvas,
-                objects: objects,
-              });
-            }
+            updateCompositionGuide(pinned, snap.srcW, snap.srcH, {
+              canvas: snap.canvas,
+              objects: objects,
+            });
             // 软刷新跟踪，但不硬清 pin
             coachReanalyzeSoon = true;
             coachHardReset = false;

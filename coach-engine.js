@@ -1214,7 +1214,18 @@ export function finalizeSingleSubjectMask(mask, nx, ny, bbox, imgW, imgH) {
     };
     b = tightenBoxWithMask(b, isolated.bbox);
   }
-  m = clipMaskToBox(m, b, imgW, imgH, 0.12);
+  // 紧裁到检测框，去掉地面/拖鞋等卫星碎块
+  m = clipMaskToBox(m, b, imgW, imgH, 0.06);
+  // 再隔离一次：保证最终只有种子连通域
+  const again = isolateSeedComponent(m, nx, ny, imgW, imgH);
+  if (again) {
+    m = {
+      width: again.width,
+      height: again.height,
+      data: again.data,
+    };
+    b = tightenBoxWithMask(b, again.bbox);
+  }
   return { mask: m, bbox: b };
 }
 
@@ -1386,6 +1397,7 @@ export async function detectSubjects(source, onProgress, options) {
     if (mode === "portrait" && hasSelfieSegmenter()) {
       const selfie = runSelfieMask(canvas, videoTs, pinSeed);
       if (selfie) {
+        lastSaliencyMask = selfie;
         const hit = primaryFromMask(
           selfie,
           canvas.width,
@@ -1395,7 +1407,7 @@ export async function detectSubjects(source, onProgress, options) {
         );
         if (hit) {
           primaryRaw = {
-            label: hit.label,
+            label: "person",
             score: hit.score,
             bbox: hit.bbox.slice(),
           };
@@ -1479,27 +1491,22 @@ export async function detectSubjects(source, onProgress, options) {
           pinnedSubject.score = pinnedPick.score;
           syncPinCenterFromBbox(pinnedPick.bbox, canvas.width, canvas.height);
         } else if (pinnedSubject && pinnedSubject.bbox) {
+          // 找不到像钉选的结果：死守旧框，仅完全出画才解除
           pinMissStreak += 1;
           primaryRaw = {
             label: pinnedSubject.label,
             score: pinnedSubject.score,
             bbox: pinnedSubject.bbox.slice(),
           };
-          // 长时间找不到延续且旧框已完全出画 → 解除钉选
+          mask = null;
           if (
             isBboxFullyOutOfFrame(
               pinnedSubject.bbox,
               canvas.width,
               canvas.height
-            ) ||
-            pinMissStreak >= 50
+            )
           ) {
             maybeClearPinIfFullyOut(canvas.width, canvas.height);
-            if (pinMissStreak >= 50 && pinnedSubject) {
-              // 出画判定可能滞后：连续丢失也解除
-              pinnedSubject = null;
-              pinMissStreak = 0;
-            }
             if (!pinnedSubject) {
               primaryRaw = pickPrimarySubject(
                 objects,
@@ -1520,6 +1527,56 @@ export async function detectSubjects(source, onProgress, options) {
         mode,
         canvas
       );
+    }
+
+    // 人像：Selfie 结果必须像「人」；与 OD 人框几乎无重叠则丢弃，改用人检测
+    if (mode === "portrait" && primaryRaw && primaryRaw.bbox) {
+      const persons = objects.filter(function (o) {
+        return isPersonLabel(o.label) && o.bbox;
+      });
+      if (persons.length) {
+        let bestIoU = 0;
+        let bestPerson = null;
+        for (let i = 0; i < persons.length; i++) {
+          const iou = boxIoU(primaryRaw.bbox, persons[i].bbox);
+          if (iou > bestIoU) {
+            bestIoU = iou;
+            bestPerson = persons[i];
+          }
+        }
+        if (bestIoU < 0.08 && bestPerson) {
+          // 掩码漂到椅子/地面：改用 OD 人
+          primaryRaw = {
+            label: bestPerson.label,
+            score: bestPerson.score,
+            bbox: bestPerson.bbox.slice(),
+          };
+          mask = null;
+        } else if (bestPerson && bestIoU >= 0.08) {
+          primaryRaw.label = bestPerson.label;
+          // 用更紧的人框收掩码，避免卷进整椅/拖鞋
+          if (mask) {
+            mask = clipMaskToBox(
+              mask,
+              bestPerson.bbox,
+              canvas.width,
+              canvas.height,
+              0.08
+            );
+            primaryRaw.bbox = tightenBoxWithMask(
+              bestPerson.bbox,
+              primaryRaw.bbox
+            );
+          } else {
+            primaryRaw.bbox = bestPerson.bbox.slice();
+          }
+        }
+      } else if (!isPersonLabel(primaryRaw.label) && !pinnedSubject) {
+        primaryRaw = null;
+        mask = null;
+      } else {
+        primaryRaw.label = primaryRaw.label || "person";
+      }
     }
   }
 
@@ -1546,10 +1603,11 @@ export async function detectSubjects(source, onProgress, options) {
       );
       if (refined.bbox) {
         const useBbox = refined.bbox;
+        // 钉选：修边必须明确延续同一主体，禁止 IoU 松到椅子
         const pinOk =
           !pinnedSubject ||
-          continuesPinnedBbox(useBbox, canvas.width, canvas.height) ||
-          boxIoU(before, useBbox) >= 0.12;
+          (continuesPinnedBbox(useBbox, canvas.width, canvas.height) &&
+            boxIoU(before, useBbox) >= 0.18);
         if (pinOk) {
           mask = refined.mask;
           primary = {
@@ -1581,12 +1639,19 @@ export async function detectSubjects(source, onProgress, options) {
             trackedSubject.score = pinnedSubject.score;
           }
         } else {
-          mask = refined.mask;
-          primary = {
-            label: primary.label,
-            score: primary.score,
-            bbox: useBbox.slice(),
-          };
+          // 未钉选：修边面积暴涨（卷进整椅）则丢弃
+          const areaBlow =
+            boxArea(useBbox) > boxArea(before) * 1.85 + 1;
+          if (areaBlow) {
+            mask = null;
+          } else {
+            mask = refined.mask;
+            primary = {
+              label: primary.label,
+              score: primary.score,
+              bbox: useBbox.slice(),
+            };
+          }
         }
       }
     }
@@ -1671,13 +1736,15 @@ export function pinSubjectAt(objects, x, y, imgW, imgH, mode) {
   const m = mode === "portrait" ? "portrait" : "landscape";
 
   // 优先：显著性 / Selfie 掩码上点选连通域
-  if (m === "landscape" && lastSaliencyMask) {
-    const hit = primaryFromMask(lastSaliencyMask, w, h, "subject", {
-      nx: nx,
-      ny: ny,
-    });
+  if (lastSaliencyMask) {
+    const hit = primaryFromMask(
+      lastSaliencyMask,
+      w,
+      h,
+      m === "portrait" ? "person" : "subject",
+      { nx: nx, ny: ny }
+    );
     if (hit && hit.bbox) {
-      // 点是否靠近该连通域
       const c = boxCenterXY(hit.bbox);
       const dist =
         Math.sqrt((c.x - x) * (c.x - x) + (c.y - y) * (c.y - y)) /
@@ -1685,7 +1752,7 @@ export function pinSubjectAt(objects, x, y, imgW, imgH, mode) {
       const inside = pointInBox(x, y, hit.bbox);
       if (inside || dist < 0.22) {
         pinnedSubject = {
-          label: hit.label,
+          label: m === "portrait" ? "person" : hit.label,
           score: hit.score,
           bbox: hit.bbox.slice(),
           nx: nx,
@@ -1693,7 +1760,7 @@ export function pinSubjectAt(objects, x, y, imgW, imgH, mode) {
         };
         pinMissStreak = 0;
         trackedSubject = {
-          label: hit.label,
+          label: pinnedSubject.label,
           score: hit.score,
           bbox: hit.bbox.slice(),
         };
@@ -1905,24 +1972,26 @@ function matchesPinned(obj, imgW, imgH) {
 function continuesPinnedBbox(bbox, imgW, imgH) {
   if (!pinnedSubject || !pinnedSubject.bbox || !bbox) return false;
   const iou = boxIoU(pinnedSubject.bbox, bbox);
-  if (iou >= 0.06) return true;
+  if (iou >= 0.12) return true;
   const pc = boxCenterXY(pinnedSubject.bbox);
   const nc = boxCenterXY(bbox);
   const dist =
     Math.hypot(pc.x - nc.x, pc.y - nc.y) /
     Math.max(1, Math.min(imgW || 1, imgH || 1));
-  if (dist < 0.24) return true;
+  // 移镜时可放宽中心距离，但仍须框有一定重叠或钉点落在新框内
   const px = (pinnedSubject.nx || 0.5) * imgW;
   const py = (pinnedSubject.ny || 0.5) * imgH;
   const b = bbox;
-  const padX = Math.abs(b[2] - b[0]) * 0.15;
-  const padY = Math.abs(b[3] - b[1]) * 0.15;
-  return (
+  const padX = Math.abs(b[2] - b[0]) * 0.1;
+  const padY = Math.abs(b[3] - b[1]) * 0.1;
+  const pinInside =
     px >= Math.min(b[0], b[2]) - padX &&
     px <= Math.max(b[0], b[2]) + padX &&
     py >= Math.min(b[1], b[3]) - padY &&
-    py <= Math.max(b[1], b[3]) + padY
-  );
+    py <= Math.max(b[1], b[3]) + padY;
+  if (iou >= 0.05 && dist < 0.2) return true;
+  if (pinInside && dist < 0.18) return true;
+  return false;
 }
 
 /**
@@ -2049,27 +2118,32 @@ export function pickPrimarySubject(objects, imgW, imgH, mode, canvas) {
     }
   }
 
-  // 软连续：优先与上一框重叠的候选；绝不回传冻住的旧框（镜头平移后旧框已失效）
-  if (
-    !pinnedSubject &&
-    trackedSubject &&
-    trackedSubject.bbox &&
-    best &&
-    best.bbox &&
-    boxIoU(trackedSubject.bbox, best.bbox) < 0.12
-  ) {
-    let cont = null;
-    let contScore = -1;
-    for (let i = 0; i < pool.length; i++) {
-      const iou = boxIoU(trackedSubject.bbox, pool[i].bbox);
-      if (iou < 0.12) continue;
-      const s = subjectSalience(pool[i], imgW, imgH, m, canvas) + iou * 4;
-      if (s > contScore) {
-        contScore = s;
-        cont = pool[i];
+  // 软锁定：跟踪中主体未完全出画前，禁止跳到椅子/拖鞋等另一物体
+  if (!pinnedSubject && trackedSubject && trackedSubject.bbox) {
+    if (!isBboxFullyOutOfFrame(trackedSubject.bbox, imgW, imgH)) {
+      let cont = null;
+      let contScore = -1;
+      for (let i = 0; i < pool.length; i++) {
+        const iou = boxIoU(trackedSubject.bbox, pool[i].bbox);
+        if (iou < 0.1) continue;
+        if (m === "portrait" && !isPersonLabel(pool[i].label)) continue;
+        const s = subjectSalience(pool[i], imgW, imgH, m, canvas) + iou * 4;
+        if (s > contScore) {
+          contScore = s;
+          cont = pool[i];
+        }
+      }
+      if (cont) {
+        best = cont;
+      } else {
+        // 本帧没找到延续：死守跟踪框，绝不换成最大显著性
+        return {
+          label: trackedSubject.label,
+          score: trackedSubject.score,
+          bbox: trackedSubject.bbox.slice(),
+        };
       }
     }
-    if (cont) best = cont;
   }
 
   if (pinnedSubject && best && matchesPinned(best, imgW, imgH)) {

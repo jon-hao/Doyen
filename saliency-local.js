@@ -152,26 +152,32 @@ function normalizePersonMask(raw, mw, mh, seed) {
     return c / Math.max(1, n);
   }
   function scoreRatio(r) {
-    if (r < 0.015 || r > 0.78) return -2;
-    // 人像常见占比
-    return 1 - Math.abs(r - 0.28) * 1.6;
+    // 人像主体常见 5%–45%；过大几乎一定是反选（整背景）
+    if (r < 0.02 || r > 0.55) return -2;
+    return 1 - Math.abs(r - 0.22) * 2.2;
   }
 
   const a = build(false);
   const b = build(true);
   const ra = fgRatio(a);
   const rb = fgRatio(b);
+  const sa = scoreRatio(ra);
+  const sb = scoreRatio(rb);
 
   if (seed && typeof seed.nx === "number" && typeof seed.ny === "number") {
     const ix = Math.max(0, Math.min(mw - 1, Math.round(seed.nx * (mw - 1))));
     const iy = Math.max(0, Math.min(mh - 1, Math.round(seed.ny * (mh - 1))));
     const i = iy * mw + ix;
-    // 种子应落在人身上
-    if (a[i] && scoreRatio(ra) > -1) return a;
-    if (b[i] && scoreRatio(rb) > -1) return b;
+    // 种子应落在人身上，且前景占比合理
+    if (a[i] && sa > sb && sa > -1) return a;
+    if (b[i] && sb > sa && sb > -1) return b;
+    if (a[i] && sa > -1 && ra < 0.5) return a;
+    if (b[i] && sb > -1 && rb < 0.5) return b;
   }
 
-  return scoreRatio(ra) >= scoreRatio(rb) ? a : b;
+  // 无种子：宁可偏小人像，也不要整屏背景
+  if (sa >= sb) return a;
+  return b;
 }
 
 /**
@@ -460,7 +466,7 @@ export function primaryFromMask(mask, imgW, imgH, label, preferSeed) {
       const dist =
         Math.hypot(ccx - pcx, ccy - pcy) /
         Math.max(1, Math.min(imgW, imgH));
-      if (c.iou >= 0.06 || dist < 0.22) {
+      if (c.iou >= 0.1 || (c.iou >= 0.04 && dist < 0.16)) {
         ok = c;
         break;
       }

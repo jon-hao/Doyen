@@ -104,13 +104,15 @@ const GRADE_HYST = 0.025;
 const SCORE_EMA = 0.55;
 /** 主体中心 EMA：偏跟手 */
 const CENTER_EMA = 0.55;
-/** 箭头死区（归一化画面坐标） */
-const ARROW_DEAD = 0.055;
+/** 箭头死区（归一化画面坐标）——偏大，镜头几乎不动时不抖 */
+const ARROW_DEAD = 0.08;
 /** 箭头强度爬升区间 */
-const ARROW_SPAN = 0.24;
+const ARROW_SPAN = 0.28;
 /** 箭头显示/隐藏迟滞 */
-const ARROW_ON = 0.22;
-const ARROW_OFF = 0.12;
+const ARROW_ON = 0.32;
+const ARROW_OFF = 0.16;
+/** 换向需超过对向强度的倍率，避免左右/上下来回跳 */
+const ARROW_FLIP_RATIO = 1.35;
 /** 因子达到该比例即视为满分，给构图/位置留余地 */
 const FACTOR_GOOD_ENOUGH = 0.9;
 
@@ -160,11 +162,40 @@ function gradeFromScoreSticky(score) {
 }
 
 function smoothArrowFlags(strengths) {
+  const pairs = [
+    ["left", "right"],
+    ["up", "down"],
+  ];
+  const raw = {
+    up: strengths.up || 0,
+    down: strengths.down || 0,
+    left: strengths.left || 0,
+    right: strengths.right || 0,
+  };
+  // 同轴只保留更强一侧，且换向要明显更强
+  for (let p = 0; p < pairs.length; p++) {
+    const a = pairs[p][0];
+    const b = pairs[p][1];
+    if (raw[a] > 0 && raw[b] > 0) {
+      if (raw[a] >= raw[b] * ARROW_FLIP_RATIO) raw[b] = 0;
+      else if (raw[b] >= raw[a] * ARROW_FLIP_RATIO) raw[a] = 0;
+      else if (stickyArrows[a]) raw[b] = 0;
+      else if (stickyArrows[b]) raw[a] = 0;
+      else if (raw[a] >= raw[b]) raw[b] = 0;
+      else raw[a] = 0;
+    } else if (stickyArrows[a] && raw[b] > 0 && raw[b] < ARROW_ON * ARROW_FLIP_RATIO) {
+      raw[b] = 0;
+      raw[a] = Math.max(raw[a], ARROW_OFF);
+    } else if (stickyArrows[b] && raw[a] > 0 && raw[a] < ARROW_ON * ARROW_FLIP_RATIO) {
+      raw[a] = 0;
+      raw[b] = Math.max(raw[b], ARROW_OFF);
+    }
+  }
   const dirs = ["up", "down", "left", "right"];
   const out = { up: 0, down: 0, left: 0, right: 0 };
   for (let i = 0; i < dirs.length; i++) {
     const d = dirs[i];
-    const s = strengths[d] || 0;
+    const s = raw[d] || 0;
     const was = !!stickyArrows[d];
     const on = was ? s >= ARROW_OFF : s >= ARROW_ON;
     stickyArrows[d] = on;
@@ -653,7 +684,7 @@ export function suggestFocalForSubject(
     }
   }
 
-  // 已有粘滞建议时：新档必须明显更贴近理想倍率才切换
+  // 已有粘滞建议时：新档必须明显更贴近理想倍率才切换（强抑制 24↔35↔13）
   if (stickyFocalZoom != null) {
     let sticky = null;
     for (let i = 0; i < list.length; i++) {
@@ -664,23 +695,32 @@ export function suggestFocalForSubject(
     }
     if (sticky) {
       const stickyDiff = Math.abs(sticky.zoom - idealZoom);
-      if (bestDiff > stickyDiff * 0.72) {
+      if (bestDiff > stickyDiff * 0.55) {
         best = sticky;
         bestDiff = stickyDiff;
       }
     }
   }
 
-  const zoomGap = Math.abs(cur - best.zoom) / Math.max(best.zoom, 0.5) > 0.08;
   const g = grade || potentialGrade;
-  // 红/黄：只要建议焦段与当前不同就提示换焦
+  // 当前焦段已够接近理想 → 不建议换；也绝不「建议当前焦段」
+  const curDiff = Math.abs(cur - idealZoom);
+  const relGap = Math.abs(cur - best.zoom) / Math.max(best.zoom, 0.5);
+  const sameAsCurrent = relGap <= 0.1 || Math.abs(cur - best.zoom) <= 0.08;
   let need = false;
-  if (g !== "S") {
-    need = zoomGap || Math.abs(cur - best.zoom) > 0.04;
+  if (g !== "S" && !sameAsCurrent) {
+    // 建议档必须比继续用当前明显更接近理想
+    need = bestDiff < curDiff * 0.82 && relGap > 0.12;
   }
 
   if (need) stickyFocalZoom = best.zoom;
-  else if (g === "S") stickyFocalZoom = null;
+  else stickyFocalZoom = g === "S" ? null : stickyFocalZoom;
+
+  // 若粘滞建议其实就是当前焦段，清空
+  if (stickyFocalZoom != null && Math.abs(stickyFocalZoom - cur) <= 0.08) {
+    stickyFocalZoom = null;
+    need = false;
+  }
 
   return {
     suggestedZoom: best.zoom,
@@ -845,93 +885,97 @@ export function evaluateLandscapeComposition(subject, imgW, imgH, options) {
     grade
   );
 
-  // 非绿色：必须给出「移镜」或「换焦」之一，避免红档却静默
-  if (grade !== "S" && hasSubject) {
-    let anyArrow =
-      arrows.up > 0 ||
-      arrows.down > 0 ||
-      arrows.left > 0 ||
-      arrows.right > 0;
-    if (!anyArrow) {
-      const ex = nx - target.x;
-      const ey = ny - target.y;
-      const force = { up: 0, down: 0, left: 0, right: 0 };
-      if (Math.abs(ex) >= Math.abs(ey)) {
-        if (ex > 0.006) force.right = 0.5;
-        else if (ex < -0.006) force.left = 0.5;
-        else if (ey > 0.006) force.down = 0.5;
-        else if (ey < -0.006) force.up = 0.5;
-      } else {
-        if (ey > 0.006) force.down = 0.5;
-        else if (ey < -0.006) force.up = 0.5;
-        else if (ex > 0.006) force.right = 0.5;
-        else if (ex < -0.006) force.left = 0.5;
-      }
-      anyArrow =
-        force.up > 0 ||
-        force.down > 0 ||
-        force.left > 0 ||
-        force.right > 0;
-      if (anyArrow) {
-        stickyArrows = {
-          up: force.up > 0,
-          down: force.down > 0,
-          left: force.left > 0,
-          right: force.right > 0,
-        };
-        arrows = force;
-      }
-    }
-
-    // 红/黄：箭头 + 焦距建议同时给（焦距只要与当前不同）
-    let needFocal = !!focal.needFocalChange;
-    const curZ = opts.currentZoom || 1;
-    if (Math.abs(focal.suggestedZoom - curZ) > 0.03) {
-      needFocal = true;
-      stickyFocalZoom = focal.suggestedZoom;
-    }
-    if (!anyArrow) {
-      const pp = nearestPowerPoint(nx, ny);
-      const ex2 = nx - pp.x;
-      const ey2 = ny - pp.y;
-      if (Math.abs(ex2) >= Math.abs(ey2)) {
-        arrows = {
-          up: 0,
-          down: 0,
-          left: ex2 < 0 ? 0.5 : 0,
-          right: ex2 >= 0 ? 0.5 : 0,
-        };
-      } else {
-        arrows = {
-          left: 0,
-          right: 0,
-          up: ey2 < 0 ? 0.5 : 0,
-          down: ey2 >= 0 ? 0.5 : 0,
-        };
-      }
-      stickyArrows = {
-        up: arrows.up > 0,
-        down: arrows.down > 0,
-        left: arrows.left > 0,
-        right: arrows.right > 0,
-      };
-      anyArrow = true;
-    }
-
+  // 绿档闭嘴：无箭头、无换焦
+  if (grade === "S" || !hasSubject) {
+    stickyArrows = { up: false, down: false, left: false, right: false };
+    stickyFocalZoom = null;
     return {
       score: score,
       grade: grade,
       color: borderColor,
       target: target,
-      subjectCenter: { x: nx, y: ny },
-      arrows: arrows,
+      subjectCenter: hasSubject ? { x: nx, y: ny } : null,
+      arrows: { up: 0, down: 0, left: 0, right: 0 },
       suggestedZoom: focal.suggestedZoom,
       suggestedMm: focal.suggestedMm,
       suggestedName: focal.suggestedName,
-      needFocalChange: needFocal,
+      needFocalChange: false,
       areaRatio: areaRatio,
       potentialGrade: potentialGrade,
       factors: factors,
+    };
+  }
+
+  // 红/黄：同时给箭头 + 换焦（换焦不得等于当前）
+  let anyArrow =
+    arrows.up > 0 ||
+    arrows.down > 0 ||
+    arrows.left > 0 ||
+    arrows.right > 0;
+  if (!anyArrow) {
+    const ex = nx - target.x;
+    const ey = ny - target.y;
+    const force = { up: 0, down: 0, left: 0, right: 0 };
+    const moveDead = 0.02;
+    if (Math.abs(ex) >= Math.abs(ey)) {
+      if (ex > moveDead) force.right = 0.55;
+      else if (ex < -moveDead) force.left = 0.55;
+      else if (ey > moveDead) force.down = 0.55;
+      else if (ey < -moveDead) force.up = 0.55;
+    } else {
+      if (ey > moveDead) force.down = 0.55;
+      else if (ey < -moveDead) force.up = 0.55;
+      else if (ex > moveDead) force.right = 0.55;
+      else if (ex < -moveDead) force.left = 0.55;
+    }
+    anyArrow =
+      force.up > 0 ||
+      force.down > 0 ||
+      force.left > 0 ||
+      force.right > 0;
+    if (anyArrow) {
+      stickyArrows = {
+        up: force.up > 0,
+        down: force.down > 0,
+        left: force.left > 0,
+        right: force.right > 0,
+      };
+      arrows = force;
+    }
+  }
+
+  let needFocal = !!focal.needFocalChange;
+  const curZ = opts.currentZoom || 1;
+  if (Math.abs(focal.suggestedZoom - curZ) <= 0.08) {
+    needFocal = false;
+  } else if (needFocal) {
+    stickyFocalZoom = focal.suggestedZoom;
+  }
+
+  if (!anyArrow) {
+    const pp = nearestPowerPoint(nx, ny);
+    const ex2 = nx - pp.x;
+    const ey2 = ny - pp.y;
+    if (Math.abs(ex2) >= Math.abs(ey2)) {
+      arrows = {
+        up: 0,
+        down: 0,
+        left: ex2 < 0 ? 0.55 : 0,
+        right: ex2 >= 0 ? 0.55 : 0,
+      };
+    } else {
+      arrows = {
+        left: 0,
+        right: 0,
+        up: ey2 < 0 ? 0.55 : 0,
+        down: ey2 >= 0 ? 0.55 : 0,
+      };
+    }
+    stickyArrows = {
+      up: arrows.up > 0,
+      down: arrows.down > 0,
+      left: arrows.left > 0,
+      right: arrows.right > 0,
     };
   }
 
@@ -940,12 +984,12 @@ export function evaluateLandscapeComposition(subject, imgW, imgH, options) {
     grade: grade,
     color: borderColor,
     target: target,
-    subjectCenter: hasSubject ? { x: nx, y: ny } : null,
+    subjectCenter: { x: nx, y: ny },
     arrows: arrows,
     suggestedZoom: focal.suggestedZoom,
     suggestedMm: focal.suggestedMm,
     suggestedName: focal.suggestedName,
-    needFocalChange: hasSubject ? focal.needFocalChange : false,
+    needFocalChange: needFocal,
     areaRatio: areaRatio,
     potentialGrade: potentialGrade,
     factors: factors,
