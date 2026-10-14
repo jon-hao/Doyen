@@ -303,12 +303,15 @@ export async function runU2NetMask(canvas) {
 }
 
 /**
- * 掩码 → 最大连通域主体框（图像坐标）
+ * 掩码 → 主体框（图像坐标）
  * @param {{width:number,height:number,data:Uint8Array,soft?:Float32Array}} mask
  * @param {number} imgW
  * @param {number} imgH
  * @param {string=} label
- * @param {{nx?:number,ny?:number}=} preferSeed 优先包含该归一化点的连通域（点击锁定）
+ * @param {{nx?:number,ny?:number,prevBbox?:number[],requirePrev?:boolean}=} preferSeed
+ *   - nx/ny：优先包含该点的连通域（点击）
+ *   - prevBbox：优先与上一框重叠/邻近的连通域（移镜跟钉选，避免跳到最大主体）
+ *   - requirePrev：有 prevBbox 时若找不到足够像的连通域则返回 null（宁可不换）
  * @returns {null|{label:string,score:number,bbox:number[],mask:{width:number,height:number,data:Uint8Array}}}
  */
 export function primaryFromMask(mask, imgW, imgH, label, preferSeed) {
@@ -317,18 +320,8 @@ export function primaryFromMask(mask, imgW, imgH, label, preferSeed) {
   const mh = mask.height | 0;
   const src = mask.data;
   const visited = new Uint8Array(mw * mh);
-
-  let bestCount = 0;
-  let bestMinX = 0;
-  let bestMinY = 0;
-  let bestMaxX = 0;
-  let bestMaxY = 0;
-  /** @type {Uint8Array|null} */
-  let bestComp = null;
-
-  let seedComp = null;
-  let seedCount = 0;
-  let seedBox = null;
+  const scaleX = Math.max(1, imgW) / mw;
+  const scaleY = Math.max(1, imgH) / mh;
 
   const wantSeed =
     preferSeed &&
@@ -340,6 +333,14 @@ export function primaryFromMask(mask, imgW, imgH, label, preferSeed) {
   const sy = wantSeed
     ? Math.max(0, Math.min(mh - 1, Math.round(preferSeed.ny * (mh - 1))))
     : -1;
+  const prev =
+    preferSeed && preferSeed.prevBbox && preferSeed.prevBbox.length >= 4
+      ? preferSeed.prevBbox
+      : null;
+  const requirePrev = !!(preferSeed && preferSeed.requirePrev && prev);
+
+  /** @type {Array<{comp:Uint8Array,count:number,box:number[],rank:number,iou:number}>} */
+  const cands = [];
 
   for (let y = 0; y < mh; y++) {
     for (let x = 0; x < mw; x++) {
@@ -383,35 +384,98 @@ export function primaryFromMask(mask, imgW, imgH, label, preferSeed) {
 
       if (count < 40) continue;
 
-      if (hitsSeed && count > seedCount) {
-        seedCount = count;
-        seedComp = comp;
-        seedBox = [minX, minY, maxX, maxY];
+      const bb = [
+        minX * scaleX,
+        minY * scaleY,
+        (maxX + 1) * scaleX,
+        (maxY + 1) * scaleY,
+      ];
+      let rank = count;
+      let iou = 0;
+      if (hitsSeed) rank += count * 1.25;
+      if (prev) {
+        const ax1 = Math.min(bb[0], bb[2]);
+        const ay1 = Math.min(bb[1], bb[3]);
+        const ax2 = Math.max(bb[0], bb[2]);
+        const ay2 = Math.max(bb[1], bb[3]);
+        const bx1 = Math.min(prev[0], prev[2]);
+        const by1 = Math.min(prev[1], prev[3]);
+        const bx2 = Math.max(prev[0], prev[2]);
+        const by2 = Math.max(prev[1], prev[3]);
+        const ix1 = Math.max(ax1, bx1);
+        const iy1 = Math.max(ay1, by1);
+        const ix2 = Math.min(ax2, bx2);
+        const iy2 = Math.min(ay2, by2);
+        const inter = Math.max(0, ix2 - ix1) * Math.max(0, iy2 - iy1);
+        const uni =
+          Math.max(0, ax2 - ax1) * Math.max(0, ay2 - ay1) +
+          Math.max(0, bx2 - bx1) * Math.max(0, by2 - by1) -
+          inter;
+        iou = uni > 0 ? inter / uni : 0;
+        const pcx = (bx1 + bx2) * 0.5;
+        const pcy = (by1 + by2) * 0.5;
+        const ccx = (ax1 + ax2) * 0.5;
+        const ccy = (ay1 + ay2) * 0.5;
+        const dist =
+          Math.hypot(ccx - pcx, ccy - pcy) /
+          Math.max(1, Math.min(imgW, imgH));
+        // 钉选跟随时：重叠/邻近远比「最大连通域」重要
+        rank = iou * 50000 + (1 - Math.min(1, dist * 2.2)) * 20000 + count;
+        if (hitsSeed) rank += 8000;
       }
-      if (count > bestCount) {
-        bestCount = count;
-        bestComp = comp;
-        bestMinX = minX;
-        bestMinY = minY;
-        bestMaxX = maxX;
-        bestMaxY = maxY;
-      }
+
+      cands.push({
+        comp: comp,
+        count: count,
+        box: [minX, minY, maxX, maxY],
+        rank: rank,
+        iou: iou,
+      });
     }
   }
 
-  let useComp = bestComp;
-  let useCount = bestCount;
-  let box = [bestMinX, bestMinY, bestMaxX, bestMaxY];
-  if (seedComp && seedCount >= 40) {
-    useComp = seedComp;
-    useCount = seedCount;
-    box = seedBox;
-  }
-  if (!useComp || useCount < 40) return null;
+  if (!cands.length) return null;
+  cands.sort(function (a, b) {
+    return b.rank - a.rank;
+  });
 
-  const scaleX = Math.max(1, imgW) / mw;
-  const scaleY = Math.max(1, imgH) / mh;
-  const pad = Math.max(1, Math.round(Math.min(box[2] - box[0], box[3] - box[1]) * 0.04));
+  let best = cands[0];
+  if (requirePrev) {
+    // 必须像上一框：IoU 或中心足够近，否则视为钉选主体本帧未找到
+    const pcx =
+      (Math.min(prev[0], prev[2]) + Math.max(prev[0], prev[2])) / 2;
+    const pcy =
+      (Math.min(prev[1], prev[3]) + Math.max(prev[1], prev[3])) / 2;
+    let ok = null;
+    for (let i = 0; i < cands.length; i++) {
+      const c = cands[i];
+      const bb = [
+        c.box[0] * scaleX,
+        c.box[1] * scaleY,
+        (c.box[2] + 1) * scaleX,
+        (c.box[3] + 1) * scaleY,
+      ];
+      const ccx = (Math.min(bb[0], bb[2]) + Math.max(bb[0], bb[2])) / 2;
+      const ccy = (Math.min(bb[1], bb[3]) + Math.max(bb[1], bb[3])) / 2;
+      const dist =
+        Math.hypot(ccx - pcx, ccy - pcy) /
+        Math.max(1, Math.min(imgW, imgH));
+      if (c.iou >= 0.06 || dist < 0.22) {
+        ok = c;
+        break;
+      }
+    }
+    if (!ok) return null;
+    best = ok;
+  }
+
+  const useComp = best.comp;
+  const useCount = best.count;
+  const box = best.box;
+  const pad = Math.max(
+    1,
+    Math.round(Math.min(box[2] - box[0], box[3] - box[1]) * 0.04)
+  );
   const bbox = [
     Math.max(0, (box[0] - pad) * scaleX),
     Math.max(0, (box[1] - pad) * scaleY),

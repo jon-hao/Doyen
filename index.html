@@ -13,7 +13,7 @@
   <meta name="apple-mobile-web-app-title" content="Doyen" />
   <meta name="application-name" content="Doyen" />
   <meta name="theme-color" content="#1a1a1a" />
-  <meta name="doyen-app-version" content="0.113" />
+  <meta name="doyen-app-version" content="0.114" />
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
   <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png" />
@@ -855,7 +855,7 @@
   <script>
     (function () {
       /** 与 version.json 同步；发版时两处一起改 */
-      const APP_VERSION = "0.113";
+      const APP_VERSION = "0.114";
       const VERSION_RELOAD_KEY = "doyen_reload_for";
 
       async function checkAppVersionAndUpdate() {
@@ -3011,14 +3011,14 @@
         }
       }
 
-      /** 切焦距 / 镜头 / 模式后：丢掉旧跟踪，作废飞行中检测，下一帧立刻重检 */
+      /** 切焦距 / 镜头 / 模式后：丢掉旧跟踪，作废飞行中检测，下一帧立刻重检（保留用户点选） */
       function reanalyzeAssistSubject() {
         if (!coachActive) return;
         coachReanalyzeSoon = true;
-        coachHardReset = true;
+        coachHardReset = false;
         coachViewGen += 1;
         if (coachEngine && coachEngine.clearTrackedSubject) {
-          coachEngine.clearTrackedSubject();
+          coachEngine.clearTrackedSubject({ keepPin: true });
         }
         clearSubjectOverlay();
       }
@@ -3040,7 +3040,8 @@
             if (coachHardReset) {
               coachHardReset = false;
               if (coachEngine && coachEngine.clearTrackedSubject) {
-                coachEngine.clearTrackedSubject();
+                // 硬重置也不清用户点选，除非停止辅助
+                coachEngine.clearTrackedSubject({ keepPin: true });
               }
             }
           }

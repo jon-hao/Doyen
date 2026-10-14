@@ -1365,10 +1365,17 @@ export async function detectSubjects(source, onProgress, options) {
   let objects = lastObjects;
   let primaryRaw = null;
   let mask = null;
-  // 仅用户点击锁定时带种子；自动识别必须每帧看全图，否则会冻在旧屏幕坐标
-  const pinSeed = pinnedSubject
-    ? seedFromSubject(pinnedSubject, canvas.width, canvas.height)
-    : null;
+  // 钉选：用上一框找连通域（requirePrev），禁止落到「全图最大主体」
+  let pinSeed = null;
+  if (pinnedSubject) {
+    const seed = seedFromSubject(pinnedSubject, canvas.width, canvas.height);
+    pinSeed = {
+      nx: seed.nx,
+      ny: seed.ny,
+      prevBbox: pinnedSubject.bbox ? pinnedSubject.bbox.slice() : null,
+      requirePrev: true,
+    };
+  }
 
   // 始终跑当帧模型；不再走「抄旧框 + MagicTouch」冻框路径
   {
@@ -1435,28 +1442,19 @@ export async function detectSubjects(source, onProgress, options) {
     lastObjects = objects;
 
     if (pinnedSubject) {
-      // 用户点选主体：始终以其为核心，直到完全移出画面才解除
-      const candidate = primaryRaw;
-      const matched =
-        candidate &&
-        candidate.bbox &&
-        matchesPinned(
-          {
-            bbox: candidate.bbox,
-            label: candidate.label,
-            score: candidate.score,
-          },
-          canvas.width,
-          canvas.height
-        );
-      if (matched) {
+      // 用户点选：只接受「像上一框」的结果；绝不换成别的主体
+      if (
+        primaryRaw &&
+        primaryRaw.bbox &&
+        continuesPinnedBbox(primaryRaw.bbox, canvas.width, canvas.height)
+      ) {
         pinMissStreak = 0;
-        pinnedSubject.bbox = candidate.bbox.slice();
-        pinnedSubject.label = candidate.label;
-        pinnedSubject.score = candidate.score;
-        syncPinCenterFromBbox(candidate.bbox, canvas.width, canvas.height);
-        primaryRaw = candidate;
+        pinnedSubject.bbox = primaryRaw.bbox.slice();
+        pinnedSubject.label = primaryRaw.label;
+        pinnedSubject.score = primaryRaw.score;
+        syncPinCenterFromBbox(primaryRaw.bbox, canvas.width, canvas.height);
       } else {
+        mask = null;
         const pinnedPick = pickPrimarySubject(
           objects,
           canvas.width,
@@ -1464,17 +1462,44 @@ export async function detectSubjects(source, onProgress, options) {
           mode,
           canvas
         );
-        if (pinnedPick && pinnedPick.bbox && pinnedSubject) {
+        if (
+          pinnedPick &&
+          pinnedPick.bbox &&
+          pinnedSubject &&
+          continuesPinnedBbox(pinnedPick.bbox, canvas.width, canvas.height)
+        ) {
+          pinMissStreak = 0;
           primaryRaw = {
             label: pinnedPick.label,
             score: pinnedPick.score,
             bbox: pinnedPick.bbox.slice(),
           };
-          mask = null;
-          pinMissStreak = 0;
+          pinnedSubject.bbox = pinnedPick.bbox.slice();
+          pinnedSubject.label = pinnedPick.label;
+          pinnedSubject.score = pinnedPick.score;
+          syncPinCenterFromBbox(pinnedPick.bbox, canvas.width, canvas.height);
         } else if (pinnedSubject && pinnedSubject.bbox) {
-          if (isBboxFullyOutOfFrame(pinnedSubject.bbox, canvas.width, canvas.height)) {
+          pinMissStreak += 1;
+          primaryRaw = {
+            label: pinnedSubject.label,
+            score: pinnedSubject.score,
+            bbox: pinnedSubject.bbox.slice(),
+          };
+          // 长时间找不到延续且旧框已完全出画 → 解除钉选
+          if (
+            isBboxFullyOutOfFrame(
+              pinnedSubject.bbox,
+              canvas.width,
+              canvas.height
+            ) ||
+            pinMissStreak >= 50
+          ) {
             maybeClearPinIfFullyOut(canvas.width, canvas.height);
+            if (pinMissStreak >= 50 && pinnedSubject) {
+              // 出画判定可能滞后：连续丢失也解除
+              pinnedSubject = null;
+              pinMissStreak = 0;
+            }
             if (!pinnedSubject) {
               primaryRaw = pickPrimarySubject(
                 objects,
@@ -1483,23 +1508,7 @@ export async function detectSubjects(source, onProgress, options) {
                 mode,
                 canvas
               );
-            } else {
-              primaryRaw = {
-                label: pinnedSubject.label,
-                score: pinnedSubject.score,
-                bbox: pinnedSubject.bbox.slice(),
-              };
-              mask = null;
             }
-          } else {
-            // 仍在画面内：坚持用户选定，不让自动识别抢走
-            pinMissStreak = 0;
-            primaryRaw = {
-              label: pinnedSubject.label,
-              score: pinnedSubject.score,
-              bbox: pinnedSubject.bbox.slice(),
-            };
-            mask = null;
           }
         }
       }
@@ -1519,7 +1528,7 @@ export async function detectSubjects(source, onProgress, options) {
 
   let primary = stabilizeSubject(primaryRaw, canvas.width, canvas.height, mode);
 
-  // 仅在没有分割掩码时 MagicTouch；有新鲜 mask 时以 mask 框为准，避免修边把框拽回旧位
+  // MagicTouch 修边：钉选时若结果不像原主体则丢弃，禁止换主体
   if (primary && primary.bbox) {
     const seed = seedFromSubject(primary, canvas.width, canvas.height);
     if (!mask) {
@@ -1535,31 +1544,49 @@ export async function detectSubjects(source, onProgress, options) {
         canvas.width,
         canvas.height
       );
-      mask = refined.mask;
       if (refined.bbox) {
         const useBbox = refined.bbox;
-        primary = {
-          label: primary.label,
-          score: primary.score,
-          bbox: useBbox.slice(),
-        };
-        if (trackedSubject) {
-          trackedSubject.bbox = useBbox.slice();
-          trackedSubject.label = primary.label;
-          trackedSubject.score = primary.score;
-        }
-        if (pinnedSubject && pinnedSubject.bbox) {
-          if (
-            matchesPinned(
-              { bbox: useBbox, label: primary.label, score: primary.score },
-              canvas.width,
-              canvas.height
-            ) ||
-            boxIoU(before, useBbox) >= 0.08
-          ) {
+        const pinOk =
+          !pinnedSubject ||
+          continuesPinnedBbox(useBbox, canvas.width, canvas.height) ||
+          boxIoU(before, useBbox) >= 0.12;
+        if (pinOk) {
+          mask = refined.mask;
+          primary = {
+            label: primary.label,
+            score: primary.score,
+            bbox: useBbox.slice(),
+          };
+          if (trackedSubject) {
+            trackedSubject.bbox = useBbox.slice();
+            trackedSubject.label = primary.label;
+            trackedSubject.score = primary.score;
+          }
+          if (pinnedSubject && pinnedSubject.bbox) {
             pinnedSubject.bbox = useBbox.slice();
             syncPinCenterFromBbox(useBbox, canvas.width, canvas.height);
+            pinMissStreak = 0;
           }
+        } else if (pinnedSubject) {
+          // 修边漂到别人：保持钉选框，丢掉错误 mask
+          mask = null;
+          primary = {
+            label: pinnedSubject.label,
+            score: pinnedSubject.score,
+            bbox: pinnedSubject.bbox.slice(),
+          };
+          if (trackedSubject) {
+            trackedSubject.bbox = pinnedSubject.bbox.slice();
+            trackedSubject.label = pinnedSubject.label;
+            trackedSubject.score = pinnedSubject.score;
+          }
+        } else {
+          mask = refined.mask;
+          primary = {
+            label: primary.label,
+            score: primary.score,
+            bbox: useBbox.slice(),
+          };
         }
       }
     }
@@ -1590,7 +1617,20 @@ export async function detectSubjects(source, onProgress, options) {
     smoothMask = null;
   }
 
-  if (pinnedSubject && primary) {
+  // 钉选期间跟踪态与钉选对齐，避免 stabilize 下一帧漂到别处
+  if (pinnedSubject && pinnedSubject.bbox && primary) {
+    trackedSubject = {
+      label: pinnedSubject.label,
+      score: pinnedSubject.score,
+      bbox: pinnedSubject.bbox.slice(),
+    };
+    primary = {
+      label: pinnedSubject.label,
+      score: pinnedSubject.score,
+      bbox: pinnedSubject.bbox.slice(),
+    };
+    lockState = "locked";
+  } else if (pinnedSubject && primary) {
     lockState = "locked";
   } else if (primary && trackedSubject) {
     lockState = trackMissStreak > 0 ? "holding" : "locked";
@@ -1858,16 +1898,31 @@ export async function analyzeFrame(source, onProgress, options) {
 
 function matchesPinned(obj, imgW, imgH) {
   if (!pinnedSubject || !obj || !obj.bbox) return false;
-  const iou = boxIoU(pinnedSubject.bbox, obj.bbox);
+  return continuesPinnedBbox(obj.bbox, imgW, imgH);
+}
+
+/** 是否为用户钉选主体的延续（移镜后仍认同一主体） */
+function continuesPinnedBbox(bbox, imgW, imgH) {
+  if (!pinnedSubject || !pinnedSubject.bbox || !bbox) return false;
+  const iou = boxIoU(pinnedSubject.bbox, bbox);
+  if (iou >= 0.06) return true;
+  const pc = boxCenterXY(pinnedSubject.bbox);
+  const nc = boxCenterXY(bbox);
+  const dist =
+    Math.hypot(pc.x - nc.x, pc.y - nc.y) /
+    Math.max(1, Math.min(imgW || 1, imgH || 1));
+  if (dist < 0.24) return true;
   const px = (pinnedSubject.nx || 0.5) * imgW;
   const py = (pinnedSubject.ny || 0.5) * imgH;
-  const b = obj.bbox;
-  const inside =
-    px >= Math.min(b[0], b[2]) &&
-    px <= Math.max(b[0], b[2]) &&
-    py >= Math.min(b[1], b[3]) &&
-    py <= Math.max(b[1], b[3]);
-  return inside || iou >= 0.08;
+  const b = bbox;
+  const padX = Math.abs(b[2] - b[0]) * 0.15;
+  const padY = Math.abs(b[3] - b[1]) * 0.15;
+  return (
+    px >= Math.min(b[0], b[2]) - padX &&
+    px <= Math.max(b[0], b[2]) + padX &&
+    py >= Math.min(b[1], b[3]) - padY &&
+    py <= Math.max(b[1], b[3]) + padY
+  );
 }
 
 /**
@@ -2109,14 +2164,21 @@ export function stabilizeSubject(next, imgW, imgH, mode) {
   return trackedSubject;
 }
 
-export function clearTrackedSubject() {
+/**
+ * @param {{keepPin?:boolean}=} opts keepPin=true 时保留用户点选主体
+ */
+export function clearTrackedSubject(opts) {
   trackedSubject = null;
-  pinnedSubject = null;
   trackMissStreak = 0;
-  pinMissStreak = 0;
   lastDetectAt = 0;
   lastObjects = [];
   smoothMask = null;
-  lockState = "searching";
   lastSaliencyMask = null;
+  if (opts && opts.keepPin && pinnedSubject) {
+    lockState = "locked";
+    return;
+  }
+  pinnedSubject = null;
+  pinMissStreak = 0;
+  lockState = "searching";
 }
