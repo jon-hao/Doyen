@@ -13,7 +13,7 @@
   <meta name="apple-mobile-web-app-title" content="Doyen" />
   <meta name="application-name" content="Doyen" />
   <meta name="theme-color" content="#1a1a1a" />
-  <meta name="doyen-app-version" content="0.111" />
+  <meta name="doyen-app-version" content="0.112" />
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
   <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png" />
@@ -855,7 +855,7 @@
   <script>
     (function () {
       /** 与 version.json 同步；发版时两处一起改 */
-      const APP_VERSION = "0.111";
+      const APP_VERSION = "0.112";
       const VERSION_RELOAD_KEY = "doyen_reload_for";
 
       async function checkAppVersionAndUpdate() {
@@ -2043,6 +2043,15 @@
       let lastTapSize = { w: 1, h: 1 };
       let lastFocalHintKey = "";
       let focalHintTimer = 0;
+      /** 镜头建议最少展示时长，避免闪一下看不清 */
+      const FOCAL_HINT_MIN_MS = 3000;
+      /** 两次不同镜头建议之间的冷却，避免两档来回跳 */
+      const FOCAL_HINT_SWITCH_MS = 6500;
+      /** needFocalChange 变 false 后延迟再隐藏 */
+      const FOCAL_HINT_HIDE_GRACE_MS = 1200;
+      /** @type {null|{key:string,name:string,mm:number,zoom:number,shownAt:number,holdUntil:number}} */
+      let stickyFocalHint = null;
+      let focalHintHideAfter = 0;
 
       function coachAssetUrl(fileName) {
         const pathName = location.pathname || "/";
@@ -2239,6 +2248,8 @@
           compFocalHint.textContent = "";
         }
         lastFocalHintKey = "";
+        stickyFocalHint = null;
+        focalHintHideAfter = 0;
         if (focalHintTimer) {
           window.clearTimeout(focalHintTimer);
           focalHintTimer = 0;
@@ -2301,24 +2312,89 @@
         }
 
         if (compFocalHint) {
+          const now = Date.now();
           if (guide.needFocalChange) {
+            focalHintHideAfter = 0;
             const key =
               guide.suggestedName +
               "-" +
               guide.suggestedMm +
               "-" +
               guide.suggestedZoom;
-            compFocalHint.textContent =
-              "建议切换至 " +
-              guide.suggestedName +
-              " · " +
-              guide.suggestedMm +
-              "mm";
-            compFocalHint.classList.add("show");
-            if (key !== lastFocalHintKey) {
-              lastFocalHintKey = key;
-              // 轻提示一次，并短暂高亮对应焦段按钮
-              highlightSuggestedFocal(guide.suggestedZoom);
+            const incoming = {
+              key: key,
+              name: guide.suggestedName,
+              mm: guide.suggestedMm,
+              zoom: guide.suggestedZoom,
+            };
+            if (!stickyFocalHint) {
+              stickyFocalHint = {
+                key: incoming.key,
+                name: incoming.name,
+                mm: incoming.mm,
+                zoom: incoming.zoom,
+                shownAt: now,
+                holdUntil: now + FOCAL_HINT_MIN_MS,
+              };
+              lastFocalHintKey = incoming.key;
+              highlightSuggestedFocal(incoming.zoom);
+            } else if (incoming.key === stickyFocalHint.key) {
+              // 同一建议：延长最少展示窗，保证持续可见
+              stickyFocalHint.holdUntil = Math.max(
+                stickyFocalHint.holdUntil,
+                now + 800
+              );
+            } else if (now - stickyFocalHint.shownAt >= FOCAL_HINT_SWITCH_MS) {
+              // 冷却后才允许换成另一个镜头建议
+              stickyFocalHint = {
+                key: incoming.key,
+                name: incoming.name,
+                mm: incoming.mm,
+                zoom: incoming.zoom,
+                shownAt: now,
+                holdUntil: now + FOCAL_HINT_MIN_MS,
+              };
+              lastFocalHintKey = incoming.key;
+              highlightSuggestedFocal(incoming.zoom);
+            }
+            // 冷却期内若收到不同建议：继续显示当前粘滞文案
+            if (stickyFocalHint) {
+              compFocalHint.textContent =
+                "建议切换至 " +
+                stickyFocalHint.name +
+                " · " +
+                stickyFocalHint.mm +
+                "mm";
+              compFocalHint.classList.add("show");
+            }
+          } else if (stickyFocalHint) {
+            if (now < stickyFocalHint.holdUntil) {
+              // 最短 3 秒内强制继续显示
+              compFocalHint.textContent =
+                "建议切换至 " +
+                stickyFocalHint.name +
+                " · " +
+                stickyFocalHint.mm +
+                "mm";
+              compFocalHint.classList.add("show");
+            } else {
+              if (!focalHintHideAfter) {
+                focalHintHideAfter = now + FOCAL_HINT_HIDE_GRACE_MS;
+              }
+              if (now < focalHintHideAfter) {
+                compFocalHint.textContent =
+                  "建议切换至 " +
+                  stickyFocalHint.name +
+                  " · " +
+                  stickyFocalHint.mm +
+                  "mm";
+                compFocalHint.classList.add("show");
+              } else {
+                compFocalHint.classList.remove("show");
+                stickyFocalHint = null;
+                lastFocalHintKey = "";
+                focalHintHideAfter = 0;
+              }
             }
           } else {
             compFocalHint.classList.remove("show");

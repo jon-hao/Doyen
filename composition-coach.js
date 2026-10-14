@@ -121,6 +121,8 @@ let stickyGrade = null;
 let smoothCenter = null;
 /** @type {{up:boolean,down:boolean,left:boolean,right:boolean}} */
 let stickyArrows = { up: false, down: false, left: false, right: false };
+/** @type {number|null} 粘滞建议焦段，避免两档镜头来回跳 */
+let stickyFocalZoom = null;
 
 function clamp01(v) {
   return Math.max(0, Math.min(1, v));
@@ -174,6 +176,7 @@ export function resetCompositionGuideState() {
   stickyGrade = null;
   smoothCenter = null;
   stickyArrows = { up: false, down: false, left: false, right: false };
+  stickyFocalZoom = null;
 }
 
 function boxCenter(b) {
@@ -604,6 +607,7 @@ function composeWeightedScore(factors, gateMul, hasSubject) {
 
 /**
  * 仅当当前焦段即使构图拉满也只能红档(B)时，才建议换焦。
+ * 建议焦段带粘滞：理想倍率落在两档中间时不来回跳。
  */
 export function suggestFocalForSubject(
   areaRatio,
@@ -635,10 +639,31 @@ export function suggestFocalForSubject(
     }
   }
 
+  // 已有粘滞建议时：新档必须明显更贴近理想倍率才切换
+  if (stickyFocalZoom != null) {
+    let sticky = null;
+    for (let i = 0; i < list.length; i++) {
+      if (Math.abs(list[i].zoom - stickyFocalZoom) < 0.05) {
+        sticky = list[i];
+        break;
+      }
+    }
+    if (sticky) {
+      const stickyDiff = Math.abs(sticky.zoom - idealZoom);
+      if (bestDiff > stickyDiff * 0.72) {
+        best = sticky;
+        bestDiff = stickyDiff;
+      }
+    }
+  }
+
   const canReachYellowOrBetter =
     potentialGrade === "A" || potentialGrade === "S";
-  const zoomGap = Math.abs(cur - best.zoom) / Math.max(best.zoom, 0.5) > 0.18;
+  const zoomGap = Math.abs(cur - best.zoom) / Math.max(best.zoom, 0.5) > 0.24;
   const need = !canReachYellowOrBetter && zoomGap && potentialGrade === "B";
+
+  if (need) stickyFocalZoom = best.zoom;
+  else stickyFocalZoom = null;
 
   return {
     suggestedZoom: best.zoom,
