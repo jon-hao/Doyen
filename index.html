@@ -13,7 +13,7 @@
   <meta name="apple-mobile-web-app-title" content="Doyen" />
   <meta name="application-name" content="Doyen" />
   <meta name="theme-color" content="#1a1a1a" />
-  <meta name="doyen-app-version" content="0.114" />
+  <meta name="doyen-app-version" content="0.115" />
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
   <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png" />
@@ -233,6 +233,18 @@
     .zoom-btn.focal-suggest {
       box-shadow: 0 0 0 1.5px rgba(250, 204, 21, 0.55);
       color: rgba(254, 240, 138, 0.95);
+      animation: focalSuggestPulse 1.05s ease-in-out infinite;
+    }
+    @keyframes focalSuggestPulse {
+      0%,
+      100% {
+        box-shadow: 0 0 0 1.5px rgba(250, 204, 21, 0.35);
+        background: rgba(250, 204, 21, 0.08);
+      }
+      50% {
+        box-shadow: 0 0 0 2px rgba(250, 204, 21, 0.85);
+        background: rgba(250, 204, 21, 0.22);
+      }
     }
 
     #bottomRow {
@@ -269,21 +281,83 @@
 
     #shutter:disabled { opacity: 0.35; }
 
-    #flipBtn {
+    #rightSlot {
       justify-self: end;
-      width: 48px;
-      height: 48px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      max-width: 110px;
+    }
+
+    #flipBtn {
+      width: 40px;
+      height: 40px;
       border: 0;
       border-radius: 50%;
       background: rgba(255, 255, 255, 0.18);
       color: #fff;
-      font-size: 22px;
+      font-size: 20px;
       line-height: 1;
       backdrop-filter: blur(10px);
       -webkit-backdrop-filter: blur(10px);
     }
 
     #flipBtn:disabled { opacity: 0.35; }
+
+    #gridBtn {
+      min-width: 72px;
+      height: 48px;
+      border: 2px solid rgba(255, 255, 255, 0.28);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.12);
+      color: #fff;
+      font-size: 13px;
+      font-weight: 700;
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      padding: 0 12px;
+      white-space: nowrap;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #gridBtn.active {
+      border-color: rgba(255, 255, 255, 0.7);
+      background: rgba(255, 255, 255, 0.2);
+    }
+
+    #ruleGrid {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 4;
+      display: none;
+      background:
+        linear-gradient(
+          to right,
+          transparent calc(33.333% - 0.5px),
+          rgba(255, 255, 255, 0.38) calc(33.333% - 0.5px),
+          rgba(255, 255, 255, 0.38) calc(33.333% + 0.5px),
+          transparent calc(33.333% + 0.5px),
+          transparent calc(66.666% - 0.5px),
+          rgba(255, 255, 255, 0.38) calc(66.666% - 0.5px),
+          rgba(255, 255, 255, 0.38) calc(66.666% + 0.5px),
+          transparent calc(66.666% + 0.5px)
+        ),
+        linear-gradient(
+          to bottom,
+          transparent calc(33.333% - 0.5px),
+          rgba(255, 255, 255, 0.38) calc(33.333% - 0.5px),
+          rgba(255, 255, 255, 0.38) calc(33.333% + 0.5px),
+          transparent calc(33.333% + 0.5px),
+          transparent calc(66.666% - 0.5px),
+          rgba(255, 255, 255, 0.38) calc(66.666% - 0.5px),
+          rgba(255, 255, 255, 0.38) calc(66.666% + 0.5px),
+          transparent calc(66.666% + 0.5px)
+        );
+    }
+    #ruleGrid.show {
+      display: block;
+    }
 
     #gate {
       position: absolute;
@@ -802,6 +876,7 @@
         </div>
         <div id="compFocalHint"></div>
       </div>
+      <div id="ruleGrid" aria-hidden="true"></div>
       <div id="levelHint" aria-hidden="true">请调整手机角度，保持画面水平</div>
     </div>
     <div id="review" aria-hidden="true">
@@ -832,7 +907,10 @@
             <p id="coachHint"></p>
           </div>
           <button id="shutter" type="button" aria-label="拍照" disabled></button>
-          <button id="flipBtn" type="button" aria-label="切换摄像头" disabled>⟲</button>
+          <div id="rightSlot">
+            <button id="flipBtn" type="button" aria-label="切换摄像头" disabled>⟲</button>
+            <button id="gridBtn" type="button" aria-label="构图网格" aria-pressed="false">网格</button>
+          </div>
         </div>
       </div>
     </div>
@@ -855,7 +933,7 @@
   <script>
     (function () {
       /** 与 version.json 同步；发版时两处一起改 */
-      const APP_VERSION = "0.114";
+      const APP_VERSION = "0.115";
       const VERSION_RELOAD_KEY = "doyen_reload_for";
 
       async function checkAppVersionAndUpdate() {
@@ -903,6 +981,8 @@
       const canvas = document.getElementById("shot");
       const shutter = document.getElementById("shutter");
       const flipBtn = document.getElementById("flipBtn");
+      const gridBtn = document.getElementById("gridBtn");
+      const ruleGrid = document.getElementById("ruleGrid");
       const coachBtn = document.getElementById("coachBtn");
       const coachHint = document.getElementById("coachHint");
       const subjectOverlay = document.getElementById("subjectOverlay");
@@ -2299,6 +2379,7 @@
         if (compositionCoach && compositionCoach.resetCompositionGuideState) {
           compositionCoach.resetCompositionGuideState();
         }
+        setFocalSuggestHighlight(null);
       }
 
       function updateCompositionGuide(subject, srcW, srcH, extras) {
@@ -2346,7 +2427,7 @@
         for (let i = 0; i < dirs.length; i++) {
           const dir = dirs[i];
           const strength = guide.arrows[dir] || 0;
-          const on = strength >= 0.28;
+          const on = strength >= 0.18;
           const el = compGuide.querySelector(
             '#compArrows .comp-arrow[data-dir="' + dir + '"]'
           );
@@ -2442,23 +2523,41 @@
             compFocalHint.classList.remove("show");
             lastFocalHintKey = "";
           }
+          syncFocalSuggestWithHint();
         }
       }
 
-      function highlightSuggestedFocal(zoom) {
+      /** 顶部焦距提示显示期间，对应焦段按钮保持黄色闪烁 */
+      function setFocalSuggestHighlight(zoomOrNull) {
         if (!zoomBar) return;
         const btns = zoomBar.querySelectorAll("button");
         Array.prototype.forEach.call(btns, function (btn) {
           btn.classList.remove("focal-suggest");
+          if (zoomOrNull == null) return;
           const z = Number(btn.dataset.zoom);
-          if (Math.abs(z - zoom) < 0.05) {
+          if (Math.abs(z - zoomOrNull) < 0.05) {
             btn.classList.add("focal-suggest");
-            window.setTimeout(function () {
-              btn.classList.remove("focal-suggest");
-            }, 2600);
           }
         });
       }
+
+      function highlightSuggestedFocal(zoom) {
+        setFocalSuggestHighlight(zoom);
+      }
+
+      function syncFocalSuggestWithHint() {
+        if (
+          stickyFocalHint &&
+          compFocalHint &&
+          compFocalHint.classList.contains("show")
+        ) {
+          setFocalSuggestHighlight(stickyFocalHint.zoom);
+        } else {
+          setFocalSuggestHighlight(null);
+        }
+      }
+
+      let coachPendingStart = false;
 
       async function ensureCoachModelLoaded() {
         if (coachReady) return true;
@@ -2503,9 +2602,17 @@
           try {
             if (engine.clearResumePartials) await engine.clearResumePartials();
           } catch (_) {}
+          // 加载期间点过辅助：就绪后自动开启，无需再点
+          if (coachPendingStart && !coachActive && stream) {
+            coachPendingStart = false;
+            if (facingMode !== "user") {
+              startSubjectTracking();
+            }
+          }
           return true;
         } catch (err) {
           coachLoadSilent = false;
+          coachPendingStart = false;
           try {
             if (coachEngine && coachEngine.flushActiveDownloads) {
               await coachEngine.flushActiveDownloads();
@@ -3325,7 +3432,6 @@
         pulseCoachBtn();
 
         if (!stream) return;
-        if (coachLoading) return;
         if (deviceReport && !deviceReport.assistOk) {
           showToast("当前环境不支持辅助拍摄", "err");
           return;
@@ -3335,23 +3441,44 @@
           return;
         }
 
+        if (coachActive) {
+          coachPendingStart = false;
+          stopSubjectTracking();
+          return;
+        }
+
+        // 正在后台加载：记一笔，就绪后自动开，避免必须点第二次
+        if (coachLoading) {
+          coachPendingStart = true;
+          return;
+        }
+
         coachClickBusy = true;
         try {
-          if (coachActive) {
-            stopSubjectTracking();
-            return;
-          }
-
           if (!coachReady) {
+            coachPendingStart = true;
             const ok = await ensureCoachModelLoaded();
-            if (!ok) return;
+            if (!ok) {
+              coachPendingStart = false;
+              return;
+            }
+            // ensureCoachModelLoaded 成功时可能已自动 start
+            if (coachActive) return;
           }
-
-          // 资源就绪后直接开启，无需再点一次
+          coachPendingStart = false;
           startSubjectTracking();
         } finally {
           coachClickBusy = false;
         }
+      }
+
+      function toggleRuleGrid() {
+        if (!ruleGrid || !gridBtn) return;
+        const on = !ruleGrid.classList.contains("show");
+        ruleGrid.classList.toggle("show", on);
+        ruleGrid.setAttribute("aria-hidden", on ? "false" : "true");
+        gridBtn.classList.toggle("active", on);
+        gridBtn.setAttribute("aria-pressed", on ? "true" : "false");
       }
 
       coachBtn.addEventListener("pointerdown", function () {
@@ -3402,6 +3529,12 @@
         ensurePreviewFullscreen();
         flipCamera();
       });
+      if (gridBtn) {
+        gridBtn.addEventListener("click", function () {
+          ensurePreviewFullscreen();
+          toggleRuleGrid();
+        });
+      }
 
       Array.prototype.forEach.call(
         modeBar.querySelectorAll(".mode-btn"),

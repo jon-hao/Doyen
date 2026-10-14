@@ -2,7 +2,7 @@
 
 网页版 AI 相机：进页环境检测 → 全屏取景拍照；支持保存/分享。「添加到主屏幕」后可作为桌面 Web App 使用。开启 **辅助拍摄** 后，实时勾勒**单一主体**，并在风景模式下给出构图评级与移镜引导。
 
-**当前版本：`0.114`**（见 `version.json`；发版时同步改 `index.html` 内 `APP_VERSION` / `meta doyen-app-version`）
+**当前版本：`0.115`**（见 `version.json`；发版时同步改 `index.html` 内 `APP_VERSION` / `meta doyen-app-version`）
 
 在线使用：https://jon-hao.github.io/Doyen/
 
