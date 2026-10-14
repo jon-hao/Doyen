@@ -54,7 +54,7 @@ const DETECT_INTERVAL_MS = 90;
 const DETECT_INTERVAL_U2_MS = 110;
 /** 丢失后短暂保持最后一框的帧数 */
 const TRACK_HOLD_FRAMES = 6;
-const PIN_HOLD_FRAMES = 14;
+const PIN_HOLD_FRAMES = 20;
 const MASK_EMA_ALPHA = 0.62;
 
 let lastDetectAt = 0;
@@ -1277,6 +1277,29 @@ function syncPinCenterFromBbox(bbox, imgW, imgH) {
   pinnedSubject.ny = cy / h;
 }
 
+/** 主体是否已完全移出取景框（用户点选锁定仅在此时解除） */
+function isBboxFullyOutOfFrame(bbox, imgW, imgH) {
+  if (!bbox || bbox.length < 4) return true;
+  const w = Math.max(1, imgW || 1);
+  const h = Math.max(1, imgH || 1);
+  const x1 = Math.min(bbox[0], bbox[2]);
+  const y1 = Math.min(bbox[1], bbox[3]);
+  const x2 = Math.max(bbox[0], bbox[2]);
+  const y2 = Math.max(bbox[1], bbox[3]);
+  const margin = Math.min(w, h) * 0.02;
+  return x2 < -margin || y2 < -margin || x1 > w + margin || y1 > h + margin;
+}
+
+function maybeClearPinIfFullyOut(imgW, imgH) {
+  if (!pinnedSubject || !pinnedSubject.bbox) return;
+  if (!isBboxFullyOutOfFrame(pinnedSubject.bbox, imgW, imgH)) return;
+  pinMissStreak += 1;
+  if (pinMissStreak >= 3) {
+    pinnedSubject = null;
+    pinMissStreak = 0;
+  }
+}
+
 /** 种子优先用当前框中心（跟镜头），避免冻在首次点击的屏幕坐标 */
 function seedFromSubject(subject, imgW, imgH) {
   const w = Math.max(1, imgW || 1);
@@ -1354,7 +1377,7 @@ export async function detectSubjects(source, onProgress, options) {
 
     // —— 主路径：人像 Selfie / 风景 u2netp ——
     if (mode === "portrait" && hasSelfieSegmenter()) {
-      const selfie = runSelfieMask(canvas, videoTs);
+      const selfie = runSelfieMask(canvas, videoTs, pinSeed);
       if (selfie) {
         const hit = primaryFromMask(
           selfie,
@@ -1411,30 +1434,29 @@ export async function detectSubjects(source, onProgress, options) {
     }
     lastObjects = objects;
 
-    if (!primaryRaw) {
-      primaryRaw = pickPrimarySubject(
-        objects,
-        canvas.width,
-        canvas.height,
-        mode,
-        canvas
-      );
-    } else if (pinnedSubject && primaryRaw.bbox) {
-      // 点击锁定：仅当当帧结果仍匹配钉点时更新；否则交给 pick 独占逻辑
-      if (
+    if (pinnedSubject) {
+      // 用户点选主体：始终以其为核心，直到完全移出画面才解除
+      const candidate = primaryRaw;
+      const matched =
+        candidate &&
+        candidate.bbox &&
         matchesPinned(
-          { bbox: primaryRaw.bbox, label: primaryRaw.label, score: primaryRaw.score },
+          {
+            bbox: candidate.bbox,
+            label: candidate.label,
+            score: candidate.score,
+          },
           canvas.width,
           canvas.height
-        )
-      ) {
+        );
+      if (matched) {
         pinMissStreak = 0;
-        pinnedSubject.bbox = primaryRaw.bbox.slice();
-        pinnedSubject.label = primaryRaw.label;
-        pinnedSubject.score = primaryRaw.score;
-        syncPinCenterFromBbox(primaryRaw.bbox, canvas.width, canvas.height);
+        pinnedSubject.bbox = candidate.bbox.slice();
+        pinnedSubject.label = candidate.label;
+        pinnedSubject.score = candidate.score;
+        syncPinCenterFromBbox(candidate.bbox, canvas.width, canvas.height);
+        primaryRaw = candidate;
       } else {
-        // 显著性漂到别的主体：用 OD 独占钉点，避免抢走用户点选
         const pinnedPick = pickPrimarySubject(
           objects,
           canvas.width,
@@ -1442,15 +1464,53 @@ export async function detectSubjects(source, onProgress, options) {
           mode,
           canvas
         );
-        if (pinnedPick && pinnedPick.bbox) {
+        if (pinnedPick && pinnedPick.bbox && pinnedSubject) {
           primaryRaw = {
             label: pinnedPick.label,
             score: pinnedPick.score,
             bbox: pinnedPick.bbox.slice(),
           };
           mask = null;
+          pinMissStreak = 0;
+        } else if (pinnedSubject && pinnedSubject.bbox) {
+          if (isBboxFullyOutOfFrame(pinnedSubject.bbox, canvas.width, canvas.height)) {
+            maybeClearPinIfFullyOut(canvas.width, canvas.height);
+            if (!pinnedSubject) {
+              primaryRaw = pickPrimarySubject(
+                objects,
+                canvas.width,
+                canvas.height,
+                mode,
+                canvas
+              );
+            } else {
+              primaryRaw = {
+                label: pinnedSubject.label,
+                score: pinnedSubject.score,
+                bbox: pinnedSubject.bbox.slice(),
+              };
+              mask = null;
+            }
+          } else {
+            // 仍在画面内：坚持用户选定，不让自动识别抢走
+            pinMissStreak = 0;
+            primaryRaw = {
+              label: pinnedSubject.label,
+              score: pinnedSubject.score,
+              bbox: pinnedSubject.bbox.slice(),
+            };
+            mask = null;
+          }
         }
       }
+    } else if (!primaryRaw) {
+      primaryRaw = pickPrimarySubject(
+        objects,
+        canvas.width,
+        canvas.height,
+        mode,
+        canvas
+      );
     }
   }
 
@@ -1807,7 +1867,7 @@ function matchesPinned(obj, imgW, imgH) {
     px <= Math.max(b[0], b[2]) &&
     py >= Math.min(b[1], b[3]) &&
     py <= Math.max(b[1], b[3]);
-  return inside || iou >= 0.12;
+  return inside || iou >= 0.08;
 }
 
 /**
@@ -1819,11 +1879,9 @@ export function pickPrimarySubject(objects, imgW, imgH, mode, canvas) {
   const list = objects || [];
   if (!list.length) {
     if (pinnedSubject && pinnedSubject.bbox) {
-      pinMissStreak += 1;
-      if (pinMissStreak >= PIN_HOLD_FRAMES) {
-        pinnedSubject = null;
-        pinMissStreak = 0;
-        return null;
+      if (isBboxFullyOutOfFrame(pinnedSubject.bbox, imgW, imgH)) {
+        maybeClearPinIfFullyOut(imgW, imgH);
+        if (!pinnedSubject) return null;
       }
       return {
         label: pinnedSubject.label,
@@ -1842,11 +1900,9 @@ export function pickPrimarySubject(objects, imgW, imgH, mode, canvas) {
     });
     if (!basePool.length) {
       if (pinnedSubject && pinnedSubject.bbox) {
-        pinMissStreak += 1;
-        if (pinMissStreak >= PIN_HOLD_FRAMES) {
-          pinnedSubject = null;
-          pinMissStreak = 0;
-          return null;
+        if (isBboxFullyOutOfFrame(pinnedSubject.bbox, imgW, imgH)) {
+          maybeClearPinIfFullyOut(imgW, imgH);
+          if (!pinnedSubject) return null;
         }
         return {
           label: pinnedSubject.label,
@@ -1862,7 +1918,7 @@ export function pickPrimarySubject(objects, imgW, imgH, mode, canvas) {
 
   let pool = prepareSingleSubjectPool(basePool);
 
-  // 锁定独占：只在匹配锁定体的候选里选
+  // 锁定独占：只在匹配锁定体的候选里选；未完全移出画面绝不换主体
   if (pinnedSubject) {
     const matched = pool.filter(function (o) {
       return matchesPinned(o, imgW, imgH);
@@ -1870,19 +1926,22 @@ export function pickPrimarySubject(objects, imgW, imgH, mode, canvas) {
     if (matched.length) {
       pool = matched;
       pinMissStreak = 0;
-    } else {
-      pinMissStreak += 1;
-      if (pinMissStreak >= PIN_HOLD_FRAMES) {
-        pinnedSubject = null;
-        pinMissStreak = 0;
-        // 解锁后用全量 pool 重选
-      } else {
+    } else if (isBboxFullyOutOfFrame(pinnedSubject.bbox, imgW, imgH)) {
+      maybeClearPinIfFullyOut(imgW, imgH);
+      if (pinnedSubject) {
         return {
           label: pinnedSubject.label,
           score: pinnedSubject.score,
           bbox: pinnedSubject.bbox.slice(),
         };
       }
+      // 已解除锁定 → 用全量 pool
+    } else {
+      return {
+        label: pinnedSubject.label,
+        score: pinnedSubject.score,
+        bbox: pinnedSubject.bbox.slice(),
+      };
     }
   }
 

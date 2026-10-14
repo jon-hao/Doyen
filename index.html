@@ -13,7 +13,7 @@
   <meta name="apple-mobile-web-app-title" content="Doyen" />
   <meta name="application-name" content="Doyen" />
   <meta name="theme-color" content="#1a1a1a" />
-  <meta name="doyen-app-version" content="0.112" />
+  <meta name="doyen-app-version" content="0.113" />
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
   <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png" />
@@ -855,7 +855,7 @@
   <script>
     (function () {
       /** 与 version.json 同步；发版时两处一起改 */
-      const APP_VERSION = "0.112";
+      const APP_VERSION = "0.113";
       const VERSION_RELOAD_KEY = "doyen_reload_for";
 
       async function checkAppVersionAndUpdate() {
@@ -1104,6 +1104,7 @@
             focal.mm +
             "mm</span>";
           btn.addEventListener("click", function () {
+            ensurePreviewFullscreen();
             if (facingMode !== "environment") return;
             applyZoomFactor(focal.zoom);
           });
@@ -1225,6 +1226,46 @@
         setTimeout(layoutVideos, 50);
         setTimeout(layoutVideos, 200);
         setTimeout(layoutVideos, 500);
+      }
+
+      /** 检测预览是否被压成非全屏 cover；异常则立刻重铺 */
+      function ensurePreviewFullscreen() {
+        if (!video || !stream) return;
+        const size = getStageSize();
+        const sw = size.sw;
+        const sh = size.sh;
+        const vw = video.videoWidth | 0;
+        const vh = video.videoHeight | 0;
+        if (!vw || !vh || !sw || !sh) {
+          scheduleLayoutVideos();
+          return;
+        }
+        const cover = Math.max(sw / vw, sh / vh);
+        const zoom = digitalScale > 1.01 ? digitalScale : 1;
+        const expect = cover * zoom;
+        const tf = String(video.style.transform || "");
+        const wStyle = parseFloat(video.style.width) || 0;
+        const hStyle = parseFloat(video.style.height) || 0;
+        const broken =
+          !tf ||
+          tf.indexOf("scale") < 0 ||
+          Math.abs(wStyle - vw) > 2 ||
+          Math.abs(hStyle - vh) > 2 ||
+          (video.clientWidth > 0 && video.clientWidth < sw * 0.85) ||
+          (video.clientHeight > 0 && video.clientHeight < sh * 0.85);
+        if (broken) {
+          layoutVideos();
+          requestAnimationFrame(layoutVideos);
+          return;
+        }
+        // transform 倍率偏离预期过大也重铺
+        const m = tf.match(/scale\(\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\)/);
+        if (m) {
+          const sy = Math.abs(parseFloat(m[2]) || 0);
+          if (sy > 0 && Math.abs(sy - expect) / expect > 0.08) {
+            layoutVideos();
+          }
+        }
       }
 
       /** 等到新流真正有宽高再布局，避免用旧尺寸/0 尺寸布局 */
@@ -1487,6 +1528,7 @@
       async function applyZoomFactor(factor) {
         if (zooming) return;
         if (facingMode !== "environment") return;
+        ensurePreviewFullscreen();
         zooming = true;
         zoomFactor = factor;
 
@@ -3007,6 +3049,7 @@
             shootMode === "portrait" ? "portrait" : "landscape";
           const holdNow = getHoldOrientation();
           const started = Date.now();
+          ensurePreviewFullscreen();
           try {
             const snap = captureDetectCanvas();
             if (!coachEngine || !coachEngine.detectSubjects) {
@@ -3171,6 +3214,7 @@
       }
 
       function onStagePointerDown(ev) {
+        ensurePreviewFullscreen();
         if (!stream) return;
         if (!controls || !controls.classList.contains("show")) return;
         if (probe && probe.classList.contains("show")) return;
@@ -3273,6 +3317,7 @@
       let coachClickBusy = false;
 
       async function onCoachClick() {
+        ensurePreviewFullscreen();
         const now = Date.now();
         if (now < coachClickLockUntil || coachClickBusy) return;
         coachClickLockUntil = now + 450;
@@ -3329,29 +3374,39 @@
 
       function onHoldOrientationChange() {
         scheduleLayoutVideos();
+        ensurePreviewFullscreen();
         if (coachActive) {
           reanalyzeAssistSubject();
         }
       }
 
       gate.addEventListener("click", function () {
+        ensurePreviewFullscreen();
         runDeviceProbe();
       });
       probe.addEventListener("click", function () {
         // 仅失败态允许轻触重试
         if (probeRetryHint && !probeRetryHint.hidden && !starting) {
+          ensurePreviewFullscreen();
           runDeviceProbe();
         }
       });
-      shutter.addEventListener("click", onShutter);
+      shutter.addEventListener("click", function (ev) {
+        ensurePreviewFullscreen();
+        onShutter(ev);
+      });
       if (reviewSave) reviewSave.addEventListener("click", onReviewSave);
       if (reviewCancel) reviewCancel.addEventListener("click", onReviewCancel);
-      flipBtn.addEventListener("click", flipCamera);
+      flipBtn.addEventListener("click", function () {
+        ensurePreviewFullscreen();
+        flipCamera();
+      });
 
       Array.prototype.forEach.call(
         modeBar.querySelectorAll(".mode-btn"),
         function (btn) {
           btn.addEventListener("click", function () {
+            ensurePreviewFullscreen();
             setShootMode(btn.dataset.mode);
           });
         }

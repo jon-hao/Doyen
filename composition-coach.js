@@ -606,14 +606,19 @@ function composeWeightedScore(factors, gateMul, hasSubject) {
 }
 
 /**
- * 仅当当前焦段即使构图拉满也只能红档(B)时，才建议换焦。
- * 建议焦段带粘滞：理想倍率落在两档中间时不来回跳。
+ * 建议换焦：非绿色时应积极提示；建议焦段带粘滞避免两档来回跳。
+ * @param {number} areaRatio
+ * @param {number} currentZoom
+ * @param {{name:string,mm:number,zoom:number}[]} focals
+ * @param {"B"|"A"|"S"} potentialGrade
+ * @param {"B"|"A"|"S"|null=} grade
  */
 export function suggestFocalForSubject(
   areaRatio,
   currentZoom,
   focals,
-  potentialGrade
+  potentialGrade,
+  grade
 ) {
   const list = focals || [];
   const cur = currentZoom || 1;
@@ -657,13 +662,21 @@ export function suggestFocalForSubject(
     }
   }
 
-  const canReachYellowOrBetter =
-    potentialGrade === "A" || potentialGrade === "S";
-  const zoomGap = Math.abs(cur - best.zoom) / Math.max(best.zoom, 0.5) > 0.24;
-  const need = !canReachYellowOrBetter && zoomGap && potentialGrade === "B";
+  const zoomGap = Math.abs(cur - best.zoom) / Math.max(best.zoom, 0.5) > 0.14;
+  const sizeOff = Math.abs(safeArea - targetArea) > 0.05;
+  const g = grade || potentialGrade;
+  let need = false;
+  if (g !== "S") {
+    // 非绿：尺寸不对或红档且换焦更接近理想 → 建议换焦
+    need =
+      zoomGap &&
+      (sizeOff || g === "B" || potentialGrade === "B");
+  } else {
+    need = false;
+  }
 
   if (need) stickyFocalZoom = best.zoom;
-  else stickyFocalZoom = null;
+  else if (g === "S") stickyFocalZoom = null;
 
   return {
     suggestedZoom: best.zoom,
@@ -818,14 +831,106 @@ export function evaluateLandscapeComposition(subject, imgW, imgH, options) {
   } else {
     stickyArrows = { up: false, down: false, left: false, right: false };
   }
-  const arrows = smoothArrowFlags(arrowStrength);
+  let arrows = smoothArrowFlags(arrowStrength);
 
   const focal = suggestFocalForSubject(
     areaRatio,
     opts.currentZoom || 1,
     opts.focals || [],
-    potentialGrade
+    potentialGrade,
+    grade
   );
+
+  // 非绿色：必须给出「移镜」或「换焦」之一，避免红档却静默
+  if (grade !== "S" && hasSubject) {
+    let anyArrow =
+      arrows.up > 0 ||
+      arrows.down > 0 ||
+      arrows.left > 0 ||
+      arrows.right > 0;
+    if (!anyArrow) {
+      const ex = nx - target.x;
+      const ey = ny - target.y;
+      const force = { up: 0, down: 0, left: 0, right: 0 };
+      if (Math.abs(ex) >= Math.abs(ey)) {
+        if (ex > 0.006) force.right = 0.5;
+        else if (ex < -0.006) force.left = 0.5;
+        else if (ey > 0.006) force.down = 0.5;
+        else if (ey < -0.006) force.up = 0.5;
+      } else {
+        if (ey > 0.006) force.down = 0.5;
+        else if (ey < -0.006) force.up = 0.5;
+        else if (ex > 0.006) force.right = 0.5;
+        else if (ex < -0.006) force.left = 0.5;
+      }
+      anyArrow =
+        force.up > 0 ||
+        force.down > 0 ||
+        force.left > 0 ||
+        force.right > 0;
+      if (anyArrow) {
+        stickyArrows = {
+          up: force.up > 0,
+          down: force.down > 0,
+          left: force.left > 0,
+          right: force.right > 0,
+        };
+        arrows = force;
+      }
+    }
+
+    let needFocal = !!focal.needFocalChange;
+    if (!anyArrow && !needFocal) {
+      // 构图已贴目标但仍非绿：尽量给换焦；否则轻微移镜提示
+      const curZ = opts.currentZoom || 1;
+      if (Math.abs(focal.suggestedZoom - curZ) > 0.03) {
+        needFocal = true;
+        stickyFocalZoom = focal.suggestedZoom;
+      } else {
+        const pp = nearestPowerPoint(nx, ny);
+        const ex2 = nx - pp.x;
+        const ey2 = ny - pp.y;
+        if (Math.abs(ex2) >= Math.abs(ey2)) {
+          arrows = {
+            up: 0,
+            down: 0,
+            left: ex2 < 0 ? 0.42 : 0,
+            right: ex2 >= 0 ? 0.42 : 0,
+          };
+        } else {
+          arrows = {
+            left: 0,
+            right: 0,
+            up: ey2 < 0 ? 0.42 : 0,
+            down: ey2 >= 0 ? 0.42 : 0,
+          };
+        }
+        stickyArrows = {
+          up: arrows.up > 0,
+          down: arrows.down > 0,
+          left: arrows.left > 0,
+          right: arrows.right > 0,
+        };
+        anyArrow = true;
+      }
+    }
+
+    return {
+      score: score,
+      grade: grade,
+      color: borderColor,
+      target: target,
+      subjectCenter: { x: nx, y: ny },
+      arrows: arrows,
+      suggestedZoom: focal.suggestedZoom,
+      suggestedMm: focal.suggestedMm,
+      suggestedName: focal.suggestedName,
+      needFocalChange: needFocal,
+      areaRatio: areaRatio,
+      potentialGrade: potentialGrade,
+      factors: factors,
+    };
+  }
 
   return {
     score: score,

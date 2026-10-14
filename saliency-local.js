@@ -129,12 +129,62 @@ function getU2Scratch() {
 }
 
 /**
+ * 将 category 原图归一成 1=人 / 0=背景。
+ * 部分机型/模型极性相反，按前景占比 + 可选种子点自动校正，避免「反选」。
+ * @param {Uint8Array} raw
+ * @param {number} mw
+ * @param {number} mh
+ * @param {{nx?:number,ny?:number}|null} seed
+ */
+function normalizePersonMask(raw, mw, mh, seed) {
+  const n = mw * mh;
+  function build(invert) {
+    const data = new Uint8Array(n);
+    for (let i = 0; i < n; i++) {
+      const fg = raw[i] > 0;
+      data[i] = invert ? (fg ? 0 : 1) : fg ? 1 : 0;
+    }
+    return data;
+  }
+  function fgRatio(data) {
+    let c = 0;
+    for (let i = 0; i < n; i++) if (data[i]) c += 1;
+    return c / Math.max(1, n);
+  }
+  function scoreRatio(r) {
+    if (r < 0.015 || r > 0.78) return -2;
+    // 人像常见占比
+    return 1 - Math.abs(r - 0.28) * 1.6;
+  }
+
+  const a = build(false);
+  const b = build(true);
+  const ra = fgRatio(a);
+  const rb = fgRatio(b);
+
+  if (seed && typeof seed.nx === "number" && typeof seed.ny === "number") {
+    const ix = Math.max(0, Math.min(mw - 1, Math.round(seed.nx * (mw - 1))));
+    const iy = Math.max(0, Math.min(mh - 1, Math.round(seed.ny * (mh - 1))));
+    const i = iy * mw + ix;
+    // 种子应落在人身上
+    if (a[i] && scoreRatio(ra) > -1) return a;
+    if (b[i] && scoreRatio(rb) > -1) return b;
+  }
+
+  return scoreRatio(ra) >= scoreRatio(rb) ? a : b;
+}
+
+/**
  * 人像：Selfie 分割 → 人物掩码（1=人）
+ * @param {HTMLCanvasElement} canvas
+ * @param {number=} timestampMs
+ * @param {{nx?:number,ny?:number}|null=} seed
  * @returns {null|{width:number,height:number,data:Uint8Array}}
  */
-export function runSelfieMask(canvas, timestampMs) {
+export function runSelfieMask(canvas, timestampMs, seed) {
   if (!selfieSegmenter || !canvas) return null;
   u2Ts = typeof timestampMs === "number" ? timestampMs : u2Ts + 33;
+  const seedOpt = seed || null;
   let out = null;
   try {
     selfieSegmenter.segmentForVideo(canvas, u2Ts, function (result) {
@@ -149,12 +199,11 @@ export function runSelfieMask(canvas, timestampMs) {
       } catch (_) {
         return;
       }
-      const data = new Uint8Array(mw * mh);
-      // category：0 背景，非 0 为人（或部件）
-      for (let i = 0; i < data.length; i++) {
-        data[i] = raw[i] > 0 ? 1 : 0;
-      }
-      out = { width: mw, height: mh, data: data };
+      out = {
+        width: mw,
+        height: mh,
+        data: normalizePersonMask(raw, mw, mh, seedOpt),
+      };
     });
   } catch (_) {
     try {
@@ -169,11 +218,11 @@ export function runSelfieMask(canvas, timestampMs) {
         } catch (_) {
           return;
         }
-        const data = new Uint8Array(mw * mh);
-        for (let i = 0; i < data.length; i++) {
-          data[i] = raw[i] > 0 ? 1 : 0;
-        }
-        out = { width: mw, height: mh, data: data };
+        out = {
+          width: mw,
+          height: mh,
+          data: normalizePersonMask(raw, mw, mh, seedOpt),
+        };
       });
     } catch (_) {
       return null;
